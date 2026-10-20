@@ -6,6 +6,11 @@ What happened when specloop was applied to a real project, the fix or open quest
 
 ---
 
+### 2026-10-21 — A spec rule that quoted config values went stale (the app)
+The app's REL-4 said coverage fails "if a BREED or LVL rule has no test", which copied the `sync.require` list from `specloop.json`. Once tier 2 landed and XP and ACH were added to that list, the rule was wrong. Nothing caught it, because `specloop check` validates IDs and tags, not whether the spec's prose matches the config.
+**Fix:** the rule now points at the config ("a rule with one of the prefixes listed under `sync.require`") instead of copying its values.
+**Takeaway:** when a rule is really about the tooling's configuration, point at the config. Don't copy its values into the spec.
+
 ### 2026-10-20 — Hooks hand their git variables to everything they start
 The first real test of worktree cleanup failed when it ran from `post-commit`. Run by hand, the same cleanup worked. While a commit hook runs, git sets `GIT_INDEX_FILE=.git/index`, a path relative to the main checkout. Every git command cleanup ran in the sync's worktree inherited it and failed with `.git/index: index file open failed`. The background session the hook launches inherited it too, along with the commit's `GIT_AUTHOR_DATE`. The earlier successful end-to-end run had escaped this only because the hook was run by hand rather than through `git commit`. `post-merge` doesn't set the index variable, so the merge-based tests had passed.
 **Tool change:** the hook unsets git's repository and commit-identity variables first thing, and the CLI strips the repository ones from every git call. Regression tests fail without the fix.
