@@ -58,6 +58,6 @@ For an app that already existed, drafting the spec from intent ("what should it 
 ---
 
 ## Open questions
-- How do two pending spec syncs interact? Committing a second spec change before merging the first sync branch means the second sync redoes the first one's work. A lock or queue may be needed. *(Not yet observed in practice.)*
+- How do two pending spec syncs interact? Committing a second spec change before merging the first sync branch means the second sync redoes the first one's work. *Partly addressed:* the hook no longer starts a sync while another is running, and `status` lists the newer revision as not started until someone runs `/spec-sync` after the first branch is merged. Whether that's the right flow is untested. *(Not yet observed in practice.)*
 - What's the right way to cover rules about UI feel (animation, palette)? Screenshot comparison, a human checklist, or just leave them as untested promises?
 - The automatic trigger has been dry-run tested but hasn't yet carried a real spec change from start to finish.

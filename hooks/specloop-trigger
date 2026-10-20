@@ -1,0 +1,70 @@
+#!/bin/sh
+#
+# specloop trigger, shared by the post-commit, post-merge and post-rewrite
+# hooks. When an update brings in a spec change the code doesn't match yet,
+# start a background Claude Code session in its own worktree that runs
+# /spec-sync and leaves the implementation on a <branchPrefix><sha> branch
+# for review.
+#
+#   specloop-trigger commit           after a commit (compares with HEAD^1)
+#   specloop-trigger merge|rebase     after a merge, pull or rebase (compares with ORIG_HEAD)
+#
+# Enable once per clone:   git config core.hooksPath tools/githooks
+# Skip for one update:     SPEC_SYNC=off git commit ...   (or merge, pull)
+# Test without launching:  SPEC_SYNC=dry-run git commit ...
+# Watch / attach:          tools/specloop status   |   claude agents
+
+[ "$SPEC_SYNC" = "off" ] && exit 0
+
+mode=${1:-commit}
+root=$(git rev-parse --show-toplevel)
+specloop="$root/tools/specloop"
+[ -x "$specloop" ] || exit 0
+
+prefix=$("$specloop" config sync.branchPrefix 2>/dev/null || echo "spec-sync/")
+permission=$("$specloop" config sync.permissionMode 2>/dev/null || echo "auto")
+
+# Don't fire mid-rebase or mid-cherry-pick, or from inside a sync branch.
+git_dir=$(git rev-parse --git-dir)
+if [ "$mode" = commit ] && { [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/rebase-apply" ] || [ -f "$git_dir/CHERRY_PICK_HEAD" ]; }; then
+    exit 0
+fi
+case "$(git rev-parse --abbrev-ref HEAD)" in "$prefix"*) exit 0 ;; esac
+
+if [ "$mode" = commit ]; then
+    "$specloop" trigger || exit 0
+else
+    since=$(git rev-parse -q --verify ORIG_HEAD) || exit 0
+    "$specloop" trigger --since "$since" || exit 0
+fi
+
+short=$(git rev-parse --short HEAD)
+session="Spec sync $short"
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "specloop: claude CLI not found — run /spec-sync manually for $short"
+    exit 0
+fi
+
+if [ "$SPEC_SYNC" = "dry-run" ]; then
+    echo "specloop: would start background session '$session'"
+    exit 0
+fi
+
+logs="$(git rev-parse --git-common-dir)/specloop/logs"
+mkdir -p "$logs"
+log="$logs/$short.log"
+
+"$specloop" sync starting --session "$session" --log "$log" >/dev/null
+if claude --bg \
+    --worktree "spec-sync-$short" \
+    --name "$session" \
+    --permission-mode "$permission" \
+    "/spec-sync" >"$log" 2>&1; then
+    echo "specloop: started background session '$session' (tools/specloop status to follow it)"
+else
+    "$specloop" sync failed --rev HEAD --note "claude --bg failed to launch; see $log" >/dev/null
+    echo "specloop: failed to start session (see $log) — run /spec-sync manually for $short"
+fi
+
+exit 0

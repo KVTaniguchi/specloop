@@ -26,10 +26,16 @@ Read the prefix with `tools/specloop config sync.branchPrefix` (default `spec-sy
 - If you're on the default branch, create `<prefix><short-sha-of-HEAD>`.
 - If the hook started you in a worktree on some other branch, rename that branch to the same name with `git branch -m`.
 
+Then record that the sync is underway, so `tools/specloop status` can show it and the hook won't start a second one:
+
+```bash
+tools/specloop sync running
+```
+
 ## 3. Plan, then build
 
 - Turn each diff hunk into concrete code changes, and name the rule IDs you're addressing.
-- **Never edit the spec.** If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Put the question in your report instead of guessing.
+- **Never edit the spec.** If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Run `tools/specloop sync blocked --note "<the question, one line>"` and put the question in your report instead of guessing.
 - Follow the project's existing conventions (see `CLAUDE.md`). If `CLAUDE.md` has a **Spec sync rules** section, those rules apply on top of this skill. That's where project-specific checks go, such as evaluation numbers for model thresholds or store copy to keep in step.
 - Every rule you add or change gets a test. Tag the test with the rule IDs at the start of its name, before the first colon: `@Test("XP-6: …")`, `it("XP-6: …")`, `@pytest.mark.spec("XP-6")`, or a `// Spec: XP-6` comment above the test.
 - If the diff renames or removes an ID, update the tests that name it.
@@ -54,6 +60,15 @@ tools/specloop mark HEAD     # before making your own commit; HEAD is the spec r
 
 - Make one commit with the code, the tests and the ledger. Use the message `Spec sync: <one-line summary>` and list the rule IDs in the body.
 - **Don't** push or merge into the default branch. The user reviews and merges.
+
+Then record the outcome:
+
+```bash
+tools/specloop sync done                              # committed, ready for review
+tools/specloop sync failed --note "<what broke>"      # tests or coverage won't pass and you're stopping
+```
+
+Always record one of `done`, `blocked` or `failed` before you finish. Otherwise `status` shows the sync as running until it goes stale.
 
 ## 6. Report
 

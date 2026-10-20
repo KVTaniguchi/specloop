@@ -13,12 +13,13 @@ Tools like GitHub Spec Kit and Kiro focus on the step from spec to plan to code.
 - **Ledger.** `docs/.spec-implemented` records the exact spec revision the code matches, so "what's left to build" is always just a `git diff`.
 - **Traceability.** Every rule has a stable ID. Every test names the IDs it checks. `specloop coverage` maps the two and fails when a test names an ID the spec no longer defines.
 - **Two-way discipline.** Spec edits drive code changes. When the code changes first, the spec is updated in the same commit.
+- **Sensors.** The hooks notice a spec change however it arrives (commit, merge, pull, rebase). `specloop status` shows where each pending revision stands, and `specloop check` fails CI when the spec and the code drift apart.
 
 ## The loop
 
 ```
-edit docs/SPEC.md ──► git commit
-                         │  post-commit hook (only if the spec changed)
+edit docs/SPEC.md ──► git commit / merge / pull
+                         │  hook (only if the spec changed and isn't built yet)
                          ▼
           background Claude Code session, own worktree
                          │  /spec-sync
@@ -43,8 +44,8 @@ This copies the following into your project, without overwriting anything you al
 
 | File | Purpose |
 |---|---|
-| `tools/specloop` | CLI: `status`, `pending`, `coverage`, `mark`, `config` |
-| `tools/githooks/post-commit` | Trigger: starts `/spec-sync` when the spec changes |
+| `tools/specloop` | CLI: `status`, `pending`, `coverage`, `check`, `mark`, `sync`, `trigger`, `config` |
+| `tools/githooks/` | Trigger: `post-commit`, `post-merge` and `post-rewrite` start `/spec-sync` when the spec changes |
 | `.claude/skills/spec-sync/` | Builds a pending spec diff |
 | `.claude/skills/spec-init/` | Drafts the first spec from existing code |
 | `specloop.json` | Spec path, test dirs and tag styles, test command |
@@ -65,16 +66,24 @@ Then:
 |---|---|
 | Change behavior | Edit the spec, commit, review the `spec-sync/…` branch, merge |
 | Skip the trigger once | `SPEC_SYNC=off git commit …` |
-| See what's pending | `tools/specloop status` / `tools/specloop pending` |
+| See what's pending | `tools/specloop status` (each pending revision: not started, running, awaiting review, blocked, failed) / `tools/specloop pending` |
 | Hotfix code directly | Change code **and** spec in one commit (`SPEC_SYNC=off`), then `tools/specloop mark` |
 | Check test coverage | `tools/specloop coverage` (`--uncovered`, `--require XP,LVL`) |
-| Watch a running sync | `claude agents`, `claude attach "Spec sync <sha>"` |
+| Watch a running sync | `tools/specloop status`, `claude agents`, `claude attach "Spec sync <sha>"` |
+| Gate CI on the spec | `tools/specloop check` ([CI setup](docs/ci.md)) |
 
 ## Docs
 
 - [Writing a spec](docs/spec-format.md): IDs, good rules, tagging tests in each framework
+- [Sensors and CI](docs/ci.md): how syncs are tracked, and `specloop check` in GitHub Actions
 - [Lessons](docs/lessons.md): what happened on a real project
 - [Example: iOS / Swift](examples/ios-swift/)
+
+## Development
+
+```bash
+python3 -m unittest discover tests
+```
 
 ## License
 

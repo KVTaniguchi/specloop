@@ -6,7 +6,14 @@ specloop — keep a spec, the code, and the tests in lockstep.
     specloop pending [--ids]         spec diff since the implemented revision
     specloop coverage [--uncovered] [--require P1,P2] [--ids ID,...]
                                      spec ID -> test traceability
+    specloop check [--format github] [--allow-pending]
+                                     CI gate: IDs, tags, coverage, ledger
     specloop mark [REV]              record REV (default HEAD) as implemented
+    specloop sync STATUS [--rev REV] [--note TEXT] [--session NAME]
+                                     record a sync's progress (used by the hook
+                                     and /spec-sync): starting, running, done,
+                                     blocked, failed
+    specloop trigger [--since REV]   exit 0 if the hook should start a sync now
     specloop config [KEY]            print config (dotted KEY, e.g. sync.branchPrefix)
 
 Configuration lives in specloop.json at the project root (found by walking up
@@ -19,6 +26,7 @@ import re
 import subprocess
 import sys
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 DEFAULTS = {
@@ -34,8 +42,15 @@ DEFAULTS = {
         "extraPatterns": [],
     },
     "commands": {"test": ""},
-    "sync": {"branchPrefix": "spec-sync/", "require": [], "permissionMode": "auto"},
+    "sync": {"branchPrefix": "spec-sync/", "require": [], "permissionMode": "auto", "staleAfterMinutes": 120},
+    "check": {"allowReused": []},
 }
+
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# A session that hasn't reported in this long after the hook launched it
+# probably never started.
+START_TIMEOUT_MINUTES = 10
+SYNC_STATUSES = ["starting", "running", "done", "blocked", "failed"]
 
 # Each style is a regex whose `ids` group holds the text that names spec IDs.
 # A test only claims the IDs written before the first colon of its name, so a
@@ -92,31 +107,70 @@ def git(root, *args, check=True):
 # MARK: spec + ledger
 
 
-def spec_ids(root, config):
-    """Ordered (id, section heading) pairs as defined in the spec."""
+def definitions(text, config):
+    """Ordered (id, line number, section heading) for every ID definition."""
     definition = re.compile(config["definitionPattern"].format(id=config["idPattern"]))
-    ids, section = [], ""
-    for line in (root / config["spec"]).read_text().splitlines():
+    found, section = [], ""
+    for number, line in enumerate(text.splitlines(), 1):
         if heading := re.match(r"^#{1,4} (.+)$", line):
             section = heading.group(1)
-        for found in definition.findall(line):
-            ids.append((found, section))
-    return ids
+        for spec_id in definition.findall(line):
+            found.append((spec_id, number, section))
+    return found
+
+
+def spec_ids(root, config):
+    """Ordered (id, section heading) pairs as defined in the spec."""
+    return [(i, section) for i, _, section in definitions((root / config["spec"]).read_text(), config)]
+
+
+def rule_texts(text, config):
+    """Map of ID -> its rule's text (every line it owns, whitespace-normalized)."""
+    owner = owning_ids(text, config)
+    texts = defaultdict(list)
+    for number, line in enumerate(text.splitlines(), 1):
+        if owner.get(number) and line.strip():
+            texts[owner[number]].append(" ".join(line.split()))
+    return {i: "\n".join(lines) for i, lines in texts.items()}
+
+
+def is_shallow(root):
+    return git(root, "rev-parse", "--is-shallow-repository", check=False).strip() == "true"
+
+
+def commit_exists(root, rev):
+    return subprocess.run(
+        ["git", "-C", str(root), "cat-file", "-e", f"{rev}^{{commit}}"], capture_output=True
+    ).returncode == 0
+
+
+def ledger_rev(root, config):
+    ledger = root / config["ledger"]
+    return ledger.read_text().strip() if ledger.exists() else ""
 
 
 def baseline(root, config):
     """The implemented revision: the ledger, else the commit that added the spec."""
-    ledger = root / config["ledger"]
-    if ledger.exists() and ledger.read_text().strip():
-        return ledger.read_text().strip()
+    if rev := ledger_rev(root, config):
+        return rev
     added = git(root, "log", "--diff-filter=A", "--format=%H", "--", config["spec"]).split()
     return added[-1] if added else None
+
+
+def missing_ledger_message(root, config, rev):
+    hint = " This is a shallow clone; fetch full history (actions/checkout: fetch-depth: 0)." if is_shallow(root) else (
+        " Was the history rewritten, or the spec commit squash-merged? Check that the code matches"
+        " the spec, then run `specloop mark` and commit."
+    )
+    return f"{config['ledger']} names {rev[:12]}, which isn't a commit in this clone.{hint}"
 
 
 def pending_diff(root, config):
     base = baseline(root, config)
     if base is None:
         return None, ""
+    if not commit_exists(root, base):
+        sys.exit(missing_ledger_message(root, config, base))
     return base, git(root, "diff", base, "HEAD", "--", config["spec"])
 
 
@@ -168,7 +222,7 @@ def changed_ids(root, config, base):
 
 
 def test_claims(root, config):
-    """Map of spec ID -> list of 'path:line  name'."""
+    """Map of spec ID -> list of (path, line number, line text)."""
     tests = config["tests"]
     patterns = [re.compile(TAG_STYLES[s], re.MULTILINE) for s in tests["tagStyles"] if s in TAG_STYLES]
     patterns += [re.compile(p, re.MULTILINE) for p in tests["extraPatterns"]]
@@ -186,7 +240,7 @@ def test_claims(root, config):
             for number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
                 for pattern in patterns:
                     if match := pattern.search(line):
-                        where = f"{path.relative_to(root)}:{number}  {line.strip()[:80]}"
+                        where = (str(path.relative_to(root)), number, line.strip()[:80])
                         for spec_id in id_re.findall(match.group("ids")):
                             claims[spec_id].append(where)
                         break
@@ -198,6 +252,180 @@ def test_claims(root, config):
             file=sys.stderr,
         )
     return claims
+
+
+def describe(where):
+    path, number, text = where
+    return f"{path}:{number}  {text}"
+
+
+# MARK: sync state
+#
+# One JSON file per sync under <git common dir>/specloop/syncs/, named after
+# the spec revision it implements. It lives in the git dir rather than the
+# work tree: it is this clone's view of its syncs, shared by every worktree.
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+def stamp():
+    return now().isoformat(timespec="seconds")
+
+
+def minutes_since(iso):
+    try:
+        return (now() - datetime.fromisoformat(iso)).total_seconds() / 60
+    except (TypeError, ValueError):
+        return float("inf")
+
+
+def ago(iso):
+    minutes = minutes_since(iso)
+    if minutes == float("inf"):
+        return "at an unknown time"
+    if minutes < 1:
+        return "just now"
+    if minutes < 90:
+        return f"{int(minutes)}m ago"
+    if minutes < 48 * 60:
+        return f"{int(minutes // 60)}h ago"
+    return f"{int(minutes // (24 * 60))}d ago"
+
+
+def state_dir(root):
+    common = Path(git(root, "rev-parse", "--git-common-dir").strip())
+    return (common if common.is_absolute() else root / common) / "specloop"
+
+
+def load_syncs(root):
+    directory = state_dir(root) / "syncs"
+    syncs = {}
+    for path in sorted(directory.glob("*.json")) if directory.exists() else []:
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        syncs[record.get("rev", path.stem)] = record
+    return syncs
+
+
+def save_sync(root, record):
+    directory = state_dir(root) / "syncs"
+    directory.mkdir(parents=True, exist_ok=True)
+    record["updated"] = stamp()
+    (directory / f"{record['rev']}.json").write_text(json.dumps(record, indent=2) + "\n")
+
+
+def remove_sync(root, rev):
+    path = state_dir(root) / "syncs" / f"{rev}.json"
+    if path.exists():
+        path.unlink()
+
+
+def is_active(record, config):
+    """A sync that should stop the hook from starting another: launched or
+    running, and not gone quiet for longer than it plausibly could."""
+    quiet = minutes_since(record.get("updated"))
+    if record.get("status") == "starting":
+        return quiet < START_TIMEOUT_MINUTES
+    if record.get("status") == "running":
+        return quiet < config["sync"]["staleAfterMinutes"]
+    return False
+
+
+def succeeds(root, *args):
+    return subprocess.run(["git", "-C", str(root), *args], capture_output=True).returncode == 0
+
+
+def short(root, rev):
+    return git(root, "rev-parse", "--short", rev).strip()
+
+
+def branch_exists(root, branch):
+    return bool(branch) and succeeds(root, "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+
+
+def describe_sync(root, config, record, branch):
+    """(state, detail) for one recorded sync."""
+    status, note = record.get("status"), record.get("note")
+    when = ago(record.get("updated"))
+    if status == "starting":
+        if is_active(record, config):
+            return "starting", f"session '{record.get('session', '')}' launched {when}"
+        log = f"; see {record['log']}" if record.get("log") else ""
+        return "failed to start?", f"launched {when} but never reported in{log}"
+    if status == "running":
+        if is_active(record, config):
+            return "running", f"on {branch}, last update {when}"
+        return "stalled?", f"on {branch}, no update since {when}; check `claude agents`"
+    if status == "done":
+        if not branch_exists(root, branch):
+            return "branch gone", f"finished {when}, but {branch} no longer exists; rerun /spec-sync"
+        if succeeds(root, "merge-base", "--is-ancestor", branch, "HEAD"):
+            return "merged", f"{branch} is merged but the ledger wasn't advanced; run specloop mark"
+        return "awaiting review", f"on {branch}, finished {when}"
+    if status == "blocked":
+        return "blocked", note or "stopped with questions about the spec"
+    return "failed", note or "the sync reported a failure"
+
+
+def sync_report(root, config, base):
+    """(short sha, state, detail) for each spec revision the code doesn't match
+    yet, oldest first, plus any live sync of a revision not on this branch."""
+    prefix = config["sync"]["branchPrefix"]
+    revs = git(root, "log", "--format=%H", f"{base}..HEAD", "--", config["spec"]).split()
+    syncs = load_syncs(root)
+    lines, covered_by = [], None
+    # Newest first: a sync implements the whole spec at its revision, so a live
+    # one also covers every older pending revision.
+    for rev in revs:
+        record = syncs.get(rev)
+        branch = (record or {}).get("branch") or f"{prefix}{short(root, rev)}"
+        if record:
+            state, detail = describe_sync(root, config, record, branch)
+        elif branch_exists(root, branch):
+            state, detail = "awaiting review", f"on {branch}"
+        elif covered_by:
+            state, detail = "included", f"in the sync of {covered_by}"
+        else:
+            state, detail = "not started", "run /spec-sync"
+        if not covered_by and state in ("starting", "running", "awaiting review"):
+            covered_by = short(root, rev)
+        lines.append((short(root, rev), state, detail))
+    lines.reverse()
+    for rev, record in syncs.items():
+        if rev not in revs and is_active(record, config) and commit_exists(root, rev):
+            state, detail = describe_sync(root, config, record, record.get("branch", ""))
+            lines.append((short(root, rev), state, f"{detail} (revision not on this branch)"))
+    return lines
+
+
+def reused_ids(root, config, current_text):
+    """(id, commit that removed it, where it came back) for IDs that were
+    removed and later defined again with different rule text."""
+    spec = config["spec"]
+    revs = git(root, "log", "--reverse", "--format=%H", "--", spec).split()
+    snapshots = [(rev[:7], git(root, "show", f"{rev}:{spec}", check=False)) for rev in revs]
+    snapshots.append(("the working tree", current_text))
+    present, last_text, removed_at, reused = set(), {}, {}, {}
+    for where, text in snapshots:
+        ids = {i for i, _, _ in definitions(text, config)}
+        texts = rule_texts(text, config)
+        for spec_id in present - ids:
+            removed_at[spec_id] = where
+        for spec_id in ids - present:
+            if spec_id not in removed_at:
+                continue
+            if texts.get(spec_id) == last_text.get(spec_id):
+                reused.pop(spec_id, None)  # a restore, e.g. a revert
+            else:
+                reused[spec_id] = (removed_at[spec_id], where)
+        for spec_id in ids:
+            last_text[spec_id] = texts.get(spec_id)
+        present = ids
+    return [(spec_id, removed, back) for spec_id, (removed, back) in reused.items() if spec_id in present]
 
 
 # MARK: commands
@@ -253,7 +481,7 @@ def cmd_coverage(root, config, args):
         print("\nTests name IDs the spec doesn't define (stale tags):")
         for spec_id in unknown:
             for where in claims[spec_id]:
-                print(f"  {spec_id}  ← {where}")
+                print(f"  {spec_id}  ← {describe(where)}")
 
     prefixes = [p.strip() for p in (args.require or ",".join(config["sync"]["require"])).split(",") if p.strip()]
     if prefixes:
@@ -280,6 +508,132 @@ def cmd_mark(root, config, args):
     return 0
 
 
+def cmd_sync(root, config, args):
+    syncs = load_syncs(root)
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    record = None
+    if args.status not in ("starting", "running") and not args.rev:
+        # A finishing sync is on its branch, past the revision it implements.
+        record = next((r for r in syncs.values() if r.get("branch") == branch and r.get("status") == "running"), None)
+    if record is None:
+        rev = git(root, "rev-parse", args.rev or "HEAD").strip()
+        record = syncs.get(rev, {"rev": rev, "started": stamp()})
+    if args.status == "running":
+        record["branch"] = branch
+        # The hook recorded the revision it launched from. If the session
+        # started from a later one, that launch record is now this sync.
+        for other, old in syncs.items():
+            if other != record["rev"] and old.get("status") == "starting" and succeeds(root, "merge-base", "--is-ancestor", other, record["rev"]):
+                remove_sync(root, other)
+    if args.status in ("done", "blocked", "failed"):
+        record["finished"] = stamp()
+    record["status"] = args.status
+    record["note"] = args.note or ""
+    for key in ("session", "log"):
+        if getattr(args, key):
+            record[key] = getattr(args, key)
+    save_sync(root, record)
+    print(f"specloop: sync of {record['rev'][:7]} is {args.status}")
+    return 0
+
+
+def cmd_trigger(root, config, args):
+    since = args.since or git(root, "rev-parse", "--verify", "-q", "HEAD^1", check=False).strip() or EMPTY_TREE
+    if not git(root, "diff", "--name-only", since, "HEAD", "--", config["spec"], check=False).strip():
+        return 1
+    base, diff = pending_diff(root, config)
+    if not diff.strip():
+        print(f"specloop: the spec changes here are already implemented (ledger at {base[:7]}).")
+        return 1
+    active = [r for r in load_syncs(root).values() if is_active(r, config)]
+    if active:
+        latest = max(active, key=lambda r: r.get("updated", ""))
+        print(
+            f"specloop: a sync of {latest['rev'][:7]} is already {latest['status']}; not starting another. "
+            f"After its branch is merged, run /spec-sync to pick up {short(root, 'HEAD')}."
+        )
+        return 1
+    return 0
+
+
+def cmd_check(root, config, args):
+    findings = []
+
+    def add(level, message, path=None, line=None):
+        findings.append((level, message, path, line))
+
+    spec = config["spec"]
+    if not (root / spec).exists():
+        add("error", f"{spec} doesn't exist. Set `spec` in specloop.json.")
+        return report(findings, args)
+    text = (root / spec).read_text()
+    defs = definitions(text, config)
+
+    first = {}
+    for spec_id, number, _ in defs:
+        if spec_id in first:
+            add("error", f"{spec_id} is defined more than once (first at line {first[spec_id]}).", spec, number)
+        else:
+            first[spec_id] = number
+
+    if is_shallow(root):
+        add("warning", "Shallow clone: skipped the reused-ID check. Fetch full history (actions/checkout: fetch-depth: 0).")
+    else:
+        allowed = set(config["check"]["allowReused"])
+        for spec_id, removed, back in reused_ids(root, config, text):
+            if spec_id not in allowed:
+                add(
+                    "error",
+                    f"{spec_id} was removed in {removed} and defined again in {back} with different text. "
+                    f"IDs are permanent: give the new rule a new number, or list {spec_id} under check.allowReused.",
+                    spec,
+                    first[spec_id],
+                )
+
+    claims = test_claims(root, config)
+    for spec_id in sorted(set(claims) - set(first)):
+        for path, number, _ in claims[spec_id]:
+            add("error", f"Test names {spec_id}, which the spec doesn't define (stale tag).", path, number)
+
+    prefixes = [p.strip() for p in (args.require or ",".join(config["sync"]["require"])).split(",") if p.strip()]
+    for spec_id, number in first.items():
+        prefix = spec_id.split("-")[0]
+        if prefix in prefixes and not claims.get(spec_id):
+            add("error", f"{spec_id} has no test, and every {prefix} rule is required to have one.", spec, number)
+
+    rev = ledger_rev(root, config)
+    if rev and not commit_exists(root, rev):
+        add("error", missing_ledger_message(root, config, rev), config["ledger"], 1)
+    else:
+        if not rev:
+            add("warning", f"No {config['ledger']} yet; treating the commit that added the spec as implemented.")
+        base = baseline(root, config)
+        if base and git(root, "diff", base, "HEAD", "--", spec).strip():
+            ids = changed_ids(root, config, base)
+            add(
+                "warning" if args.allow_pending else "error",
+                f"The spec changed after the implemented revision {base[:7]}"
+                + (f" ({', '.join(ids)})" if ids else "")
+                + " and the code hasn't caught up. Run /spec-sync, or merge its spec-sync branch.",
+                spec,
+            )
+    return report(findings, args)
+
+
+def report(findings, args):
+    errors = sum(1 for level, *_ in findings if level == "error")
+    for level, message, path, line in findings:
+        if args.format == "github":
+            where = ",".join(part for part in (path and f"file={path}", line and f"line={line}") if part)
+            print(f"::{level} {where}::{message}" if where else f"::{level}::{message}")
+        else:
+            where = f"{path}:{line}: " if path and line else f"{path}: " if path else ""
+            print(f"{level}: {where}{message}")
+    warnings = len(findings) - errors
+    print(f"specloop check: {errors} error{'s' * (errors != 1)}, {warnings} warning{'s' * (warnings != 1)}")
+    return 1 if errors else 0
+
+
 def cmd_status(root, config, args):
     base, diff = pending_diff(root, config)
     claims = test_claims(root, config)
@@ -287,6 +641,9 @@ def cmd_status(root, config, args):
     print(f"spec:        {config['spec']}")
     print(f"implemented: {base[:7] if base else '(spec not committed)'}")
     print(f"pending:     {(', '.join(changed_ids(root, config, base)) or 'changes outside any rule') if diff.strip() else 'nothing'}")
+    if diff.strip():
+        for sha, state, detail in sync_report(root, config, base):
+            print(f"  {sha}  {state:<17}{detail}")
     print(f"coverage:    {sum(1 for i in defined if claims.get(i))}/{len(defined)} IDs")
     stale = sorted(set(claims) - defined)
     if stale:
@@ -304,8 +661,20 @@ def main():
     p.add_argument("--uncovered", action="store_true")
     p.add_argument("--require", help="comma-separated ID prefixes that must be fully covered")
     p.add_argument("--ids", help="comma-separated IDs to report on (and require)")
+    p = sub.add_parser("check")
+    p.add_argument("--format", choices=["text", "github"], default="text", help="github: workflow annotations")
+    p.add_argument("--allow-pending", action="store_true", help="a spec ahead of the code is a warning, not an error")
+    p.add_argument("--require", help="comma-separated ID prefixes that must be fully covered (default: sync.require)")
     p = sub.add_parser("mark")
     p.add_argument("rev", nargs="?", default="HEAD")
+    p = sub.add_parser("sync")
+    p.add_argument("status", choices=SYNC_STATUSES)
+    p.add_argument("--rev", help="spec revision the sync implements (default: HEAD, or the running sync on this branch)")
+    p.add_argument("--note", help="why it's blocked or failed")
+    p.add_argument("--session", help="Claude Code session name")
+    p.add_argument("--log", help="where the launch output went")
+    p = sub.add_parser("trigger")
+    p.add_argument("--since", help="revision before this update (default: HEAD's first parent)")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")
     args = parser.parse_args()
@@ -316,7 +685,10 @@ def main():
         "status": cmd_status,
         "pending": cmd_pending,
         "coverage": cmd_coverage,
+        "check": cmd_check,
         "mark": cmd_mark,
+        "sync": cmd_sync,
+        "trigger": cmd_trigger,
         "config": cmd_config,
     }[args.command]
     return handler(root, config, args)
