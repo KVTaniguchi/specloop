@@ -6,6 +6,21 @@ What happened when specloop was applied to a real project, the fix or open quest
 
 ---
 
+### 2026-10-20 — Moving to the generic skill dropped the app's own sync rules
+The app's original hand-written `/spec-sync` contained project-specific checks: model threshold changes need evaluation numbers, store copy must follow feature changes, never bump the build number, and the Simulator can't check camera features. Replacing it with the generic skill would have dropped all of them without anyone noticing.
+**Fix:** projects keep these in a **"Spec sync rules for this project"** section of `CLAUDE.md`, and the generic skill applies that section on top of its own steps.
+**Tool change:** spec-sync step 3 reads the section, and `templates/CLAUDE.md` includes an empty one.
+
+### 2026-10-20 — A wrong test path silently reported 0% coverage
+While moving the app over, coverage briefly reported 0/82 because the config wasn't loaded and the default `tests/` path didn't exist. That looks exactly like a project with no tests.
+**Fix:** `specloop coverage` now warns on stderr when it scans no test files at all.
+**Tool change:** done.
+
+### 2026-10-18 — The code-first rule held without anyone enforcing it
+Two days after the baseline, a layout-only change for small and wide screens (onboarding, the success sheet, grid columns) went straight to code. The commit message ended with "Layout only; no spec change." The session that made it had read the CLAUDE.md rule and decided, correctly, that the spec described behavior, not layout.
+**Takeaway:** writing "no spec change" in the commit message makes the decision visible and checkable later.
+**Tool change:** the app's CLAUDE.md now asks for that line. **Open question:** should a `commit-msg` hook warn when app code changes with neither a spec change nor a "no spec change" note?
+
 ### 2026-10-20 — Editing a table row didn't register as a rule change
 While testing specloop against the app, changing one cell in the XP table (`Common | 10` → `12`) produced an empty `pending --ids`. The table's ID sits on the line *above* the table, so the changed line itself names no ID. A sync would have had to work out which rule the change touched.
 **Fix:** a changed line belongs to the nearest ID defined at or above it, up to the next heading. Table rows, continuation lines and sub-bullets now count toward their rule.

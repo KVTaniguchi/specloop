@@ -30,7 +30,7 @@ Read the prefix with `tools/specloop config sync.branchPrefix` (default `spec-sy
 
 - Turn each diff hunk into concrete code changes, and name the rule IDs you're addressing.
 - **Never edit the spec.** If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Put the question in your report instead of guessing.
-- Follow the project's existing conventions (see `CLAUDE.md`).
+- Follow the project's existing conventions (see `CLAUDE.md`). If `CLAUDE.md` has a **Spec sync rules** section, those rules apply on top of this skill. That's where project-specific checks go, such as evaluation numbers for model thresholds or store copy to keep in step.
 - Every rule you add or change gets a test. Tag the test with the rule IDs at the start of its name, before the first colon: `@Test("XP-6: …")`, `it("XP-6: …")`, `@pytest.mark.spec("XP-6")`, or a `// Spec: XP-6` comment above the test.
 - If the diff renames or removes an ID, update the tests that name it.
 
