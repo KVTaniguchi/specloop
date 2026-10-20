@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""
+specloop — keep a spec, the code, and the tests in lockstep.
+
+    specloop status                  ledger, pending spec change, coverage summary
+    specloop pending [--ids]         spec diff since the implemented revision
+    specloop coverage [--uncovered] [--require P1,P2] [--ids ID,...]
+                                     spec ID -> test traceability
+    specloop mark [REV]              record REV (default HEAD) as implemented
+    specloop config [KEY]            print config (dotted KEY, e.g. sync.branchPrefix)
+
+Configuration lives in specloop.json at the project root (found by walking up
+from the current directory). Python 3.8+, standard library only.
+"""
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+DEFAULTS = {
+    "spec": "docs/SPEC.md",
+    "ledger": "docs/.spec-implemented",
+    # How rule IDs look, and how the spec marks the place an ID is defined.
+    "idPattern": r"[A-Z][A-Z0-9]*-\d+",
+    "definitionPattern": r"\*\*({id})",
+    "tests": {
+        "paths": ["tests"],
+        "extensions": [".swift", ".py", ".ts", ".tsx", ".js", ".kt", ".go", ".rb"],
+        "tagStyles": ["swift-testing", "js", "pytest", "comment"],
+        "extraPatterns": [],
+    },
+    "commands": {"test": ""},
+    "sync": {"branchPrefix": "spec-sync/", "require": [], "permissionMode": "auto"},
+}
+
+# Each style is a regex whose `ids` group holds the text that names spec IDs.
+# A test only claims the IDs written before the first colon of its name, so a
+# description that happens to mention another ID doesn't count as coverage.
+TAG_STYLES = {
+    # @Test("XP-6, BREED-1: every tier pays its reward")
+    "swift-testing": r'@Test\(\s*"(?P<ids>[^":]*):',
+    # it("XP-6: ...") / test("XP-6: ...") / describe("XP-6: ...")
+    "js": r'\b(?:it|test|describe)\(\s*[\'"`](?P<ids>[^\'"`:]*):',
+    # @pytest.mark.spec("XP-6", "BREED-1")
+    "pytest": r"@pytest\.mark\.spec\((?P<ids>[^)]*)\)",
+    # // Spec: XP-6, BREED-1   or   # Spec: XP-6   (any language)
+    "comment": r"(?://|#)\s*Spec:\s*(?P<ids>.+)$",
+}
+
+
+# MARK: config
+
+
+def find_root():
+    here = Path.cwd().resolve()
+    for directory in [here, *here.parents]:
+        if (directory / "specloop.json").exists():
+            return directory
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        return Path(top)
+    except subprocess.CalledProcessError:
+        return here
+
+
+def merged(base, override):
+    out = dict(base)
+    for key, value in override.items():
+        out[key] = merged(base[key], value) if isinstance(value, dict) and isinstance(base.get(key), dict) else value
+    return out
+
+
+def load_config(root):
+    path = root / "specloop.json"
+    user = json.loads(path.read_text()) if path.exists() else {}
+    return merged(DEFAULTS, user)
+
+
+def git(root, *args, check=True):
+    result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+    if check and result.returncode != 0:
+        sys.exit(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+# MARK: spec + ledger
+
+
+def spec_ids(root, config):
+    """Ordered (id, section heading) pairs as defined in the spec."""
+    definition = re.compile(config["definitionPattern"].format(id=config["idPattern"]))
+    ids, section = [], ""
+    for line in (root / config["spec"]).read_text().splitlines():
+        if heading := re.match(r"^#{1,4} (.+)$", line):
+            section = heading.group(1)
+        for found in definition.findall(line):
+            ids.append((found, section))
+    return ids
+
+
+def baseline(root, config):
+    """The implemented revision: the ledger, else the commit that added the spec."""
+    ledger = root / config["ledger"]
+    if ledger.exists() and ledger.read_text().strip():
+        return ledger.read_text().strip()
+    added = git(root, "log", "--diff-filter=A", "--format=%H", "--", config["spec"]).split()
+    return added[-1] if added else None
+
+
+def pending_diff(root, config):
+    base = baseline(root, config)
+    if base is None:
+        return None, ""
+    return base, git(root, "diff", base, "HEAD", "--", config["spec"])
+
+
+def owning_ids(text, config):
+    """For each line number (1-based), the nearest ID defined at or above it.
+    A table row or wrapped sentence belongs to the rule whose ID precedes it."""
+    definition = re.compile(config["definitionPattern"].format(id=config["idPattern"]))
+    owner, current = {}, None
+    for number, line in enumerate(text.splitlines(), 1):
+        if re.match(r"^#{1,4} ", line):
+            current = None  # a new heading ends the previous rule's reach
+        if found := definition.findall(line):
+            current = found[0]
+        owner[number] = current
+    return owner
+
+
+def changed_ids(root, config, base):
+    """IDs whose rule text changed between `base` and HEAD, in spec order."""
+    spec = config["spec"]
+    old = git(root, "show", f"{base}:{spec}", check=False)
+    new = git(root, "show", f"HEAD:{spec}", check=False)
+    old_owner, new_owner = owning_ids(old, config), owning_ids(new, config)
+    id_re = re.compile(config["idPattern"])
+    found = []
+
+    def add(spec_id):
+        if spec_id and spec_id not in found:
+            found.append(spec_id)
+
+    old_line = new_line = 0
+    for line in git(root, "diff", "-U0", base, "HEAD", "--", spec).splitlines():
+        if hunk := re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line):
+            old_line, new_line = int(hunk.group(1)), int(hunk.group(2))
+        elif line.startswith("+") and not line.startswith("+++"):
+            for spec_id in id_re.findall(line):
+                add(spec_id)
+            add(new_owner.get(new_line))
+            new_line += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            for spec_id in id_re.findall(line):
+                add(spec_id)
+            add(old_owner.get(old_line))
+            old_line += 1
+    return found
+
+
+# MARK: tests
+
+
+def test_claims(root, config):
+    """Map of spec ID -> list of 'path:line  name'."""
+    tests = config["tests"]
+    patterns = [re.compile(TAG_STYLES[s], re.MULTILINE) for s in tests["tagStyles"] if s in TAG_STYLES]
+    patterns += [re.compile(p, re.MULTILINE) for p in tests["extraPatterns"]]
+    id_re = re.compile(config["idPattern"])
+    claims = defaultdict(list)
+    for test_dir in tests["paths"]:
+        base = root / test_dir
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            if not path.is_file() or path.suffix not in tests["extensions"]:
+                continue
+            for number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+                for pattern in patterns:
+                    if match := pattern.search(line):
+                        where = f"{path.relative_to(root)}:{number}  {line.strip()[:80]}"
+                        for spec_id in id_re.findall(match.group("ids")):
+                            claims[spec_id].append(where)
+                        break
+    return claims
+
+
+# MARK: commands
+
+
+def cmd_config(root, config, args):
+    value = config
+    for part in (args.key.split(".") if args.key else []):
+        value = value[part]
+    print(value if isinstance(value, str) else json.dumps(value, indent=2))
+    return 0
+
+
+def cmd_pending(root, config, args):
+    base, diff = pending_diff(root, config)
+    if base is None:
+        print(f"{config['spec']} is not committed yet.")
+        return 0
+    if not diff.strip():
+        print(f"Nothing pending: code matches {config['spec']} at {base[:7]}.")
+        return 0
+    if args.ids:
+        print("\n".join(changed_ids(root, config, base)) or "(changed lines sit outside any rule)")
+    else:
+        print(f"Spec changes since {base[:7]}:\n")
+        print(diff)
+    return 0
+
+
+def cmd_coverage(root, config, args):
+    ids = spec_ids(root, config)
+    defined = {i for i, _ in ids}
+    claims = test_claims(root, config)
+    only = {i.strip() for i in args.ids.split(",")} if args.ids else None
+
+    section = None
+    for spec_id, heading in ids:
+        covering = claims.get(spec_id, [])
+        if (args.uncovered and covering) or (only and spec_id not in only):
+            continue
+        if heading != section:
+            print(f"\n{heading}")
+            section = heading
+        print(f"  {'✓' if covering else '✗'} {spec_id}" + (f"  ({len(covering)})" if covering else ""))
+
+    covered = sum(1 for i in defined if claims.get(i))
+    print(f"\n{covered}/{len(defined)} spec IDs have at least one test.")
+
+    failed = False
+    unknown = sorted(set(claims) - defined)
+    if unknown:
+        failed = True
+        print("\nTests name IDs the spec doesn't define (stale tags):")
+        for spec_id in unknown:
+            for where in claims[spec_id]:
+                print(f"  {spec_id}  ← {where}")
+
+    prefixes = [p.strip() for p in (args.require or ",".join(config["sync"]["require"])).split(",") if p.strip()]
+    if prefixes:
+        missing = [i for i, _ in ids if i.split("-")[0] in prefixes and not claims.get(i)]
+        if missing:
+            failed = True
+            print(f"\nRequired but uncovered: {', '.join(missing)}")
+    if only:
+        missing = sorted(i for i in only if i in defined and not claims.get(i))
+        if missing:
+            failed = True
+            print(f"\nNamed but uncovered: {', '.join(missing)}")
+    return 1 if failed else 0
+
+
+def cmd_mark(root, config, args):
+    if git(root, "status", "--porcelain", "--", config["spec"]).strip():
+        sys.exit(f"{config['spec']} has uncommitted changes; commit them first.")
+    sha = git(root, "rev-parse", args.rev).strip()
+    ledger = root / config["ledger"]
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    ledger.write_text(sha + "\n")
+    print(f"Recorded {sha[:7]} as the implemented spec in {config['ledger']}. Commit it.")
+    return 0
+
+
+def cmd_status(root, config, args):
+    base, diff = pending_diff(root, config)
+    claims = test_claims(root, config)
+    defined = {i for i, _ in spec_ids(root, config)}
+    print(f"spec:        {config['spec']}")
+    print(f"implemented: {base[:7] if base else '(spec not committed)'}")
+    print(f"pending:     {(', '.join(changed_ids(root, config, base)) or 'changes outside any rule') if diff.strip() else 'nothing'}")
+    print(f"coverage:    {sum(1 for i in defined if claims.get(i))}/{len(defined)} IDs")
+    stale = sorted(set(claims) - defined)
+    if stale:
+        print(f"stale tags:  {', '.join(stale)}")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="specloop", description=__doc__.strip().split("\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status")
+    p = sub.add_parser("pending")
+    p.add_argument("--ids", action="store_true", help="only list IDs on changed lines")
+    p = sub.add_parser("coverage")
+    p.add_argument("--uncovered", action="store_true")
+    p.add_argument("--require", help="comma-separated ID prefixes that must be fully covered")
+    p.add_argument("--ids", help="comma-separated IDs to report on (and require)")
+    p = sub.add_parser("mark")
+    p.add_argument("rev", nargs="?", default="HEAD")
+    p = sub.add_parser("config")
+    p.add_argument("key", nargs="?")
+    args = parser.parse_args()
+
+    root = find_root()
+    config = load_config(root)
+    handler = {
+        "status": cmd_status,
+        "pending": cmd_pending,
+        "coverage": cmd_coverage,
+        "mark": cmd_mark,
+        "config": cmd_config,
+    }[args.command]
+    return handler(root, config, args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

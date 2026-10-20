@@ -1,0 +1,17 @@
+{
+  "spec": "docs/SPEC.md",
+  "ledger": "docs/.spec-implemented",
+  "tests": {
+    "paths": ["AppTests", "AppUITests"],
+    "extensions": [".swift"],
+    "tagStyles": ["swift-testing", "comment"]
+  },
+  "commands": {
+    "test": "xcodebuild -project App.xcodeproj -scheme App -destination 'platform=iOS Simulator,name=iPhone 17 Pro' test"
+  },
+  "sync": {
+    "branchPrefix": "spec-sync/",
+    "require": ["XP", "LVL"],
+    "permissionMode": "auto"
+  }
+}

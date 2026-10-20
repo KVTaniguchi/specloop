@@ -1,0 +1,16 @@
+{
+  "spec": "docs/SPEC.md",
+  "ledger": "docs/.spec-implemented",
+  "tests": {
+    "paths": ["tests"],
+    "tagStyles": ["swift-testing", "js", "pytest", "comment"]
+  },
+  "commands": {
+    "test": "<the exact command that runs your tests>"
+  },
+  "sync": {
+    "branchPrefix": "spec-sync/",
+    "require": [],
+    "permissionMode": "auto"
+  }
+}
