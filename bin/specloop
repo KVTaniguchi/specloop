@@ -9,10 +9,11 @@ specloop — keep a spec, the code, and the tests in lockstep.
     specloop check [--format github] [--allow-pending]
                                      CI gate: IDs, tags, coverage, ledger
     specloop mark [REV]              record REV (default HEAD) as implemented
-    specloop sync STATUS [--rev REV] [--note TEXT] [--session NAME]
+    specloop sync [STATUS] [--rev REV] [--note TEXT] [--session NAME] [--session-id ID]
                                      record a sync's progress (used by the hook
                                      and /spec-sync): starting, running, done,
-                                     blocked, failed
+                                     blocked, failed. Without STATUS, only
+                                     updates the given fields.
     specloop trigger [--since REV]   exit 0 if the hook should start a sync now
     specloop config [KEY]            print config (dotted KEY, e.g. sync.branchPrefix)
 
@@ -311,10 +312,11 @@ def load_syncs(root):
     return syncs
 
 
-def save_sync(root, record):
+def save_sync(root, record, touch=True):
     directory = state_dir(root) / "syncs"
     directory.mkdir(parents=True, exist_ok=True)
-    record["updated"] = stamp()
+    if touch or "updated" not in record:
+        record["updated"] = stamp()
     (directory / f"{record['rev']}.json").write_text(json.dumps(record, indent=2) + "\n")
 
 
@@ -351,15 +353,16 @@ def describe_sync(root, config, record, branch):
     """(state, detail) for one recorded sync."""
     status, note = record.get("status"), record.get("note")
     when = ago(record.get("updated"))
+    session_id = record.get("sessionId", "")[:8]
+    look = f"run `claude logs {session_id}`" if session_id else f"see {record['log']}" if record.get("log") else "check `claude agents`"
     if status == "starting":
         if is_active(record, config):
             return "starting", f"session '{record.get('session', '')}' launched {when}"
-        log = f"; see {record['log']}" if record.get("log") else ""
-        return "failed to start?", f"launched {when} but never reported in{log}"
+        return "failed to start?", f"launched {when} but never reported in; {look}"
     if status == "running":
         if is_active(record, config):
             return "running", f"on {branch}, last update {when}"
-        return "stalled?", f"on {branch}, no update since {when}; check `claude agents`"
+        return "stalled?", f"on {branch}, no update since {when}; {look}"
     if status == "done":
         if not branch_exists(root, branch):
             return "branch gone", f"finished {when}, but {branch} no longer exists; rerun /spec-sync"
@@ -517,7 +520,16 @@ def cmd_sync(root, config, args):
         record = next((r for r in syncs.values() if r.get("branch") == branch and r.get("status") == "running"), None)
     if record is None:
         rev = git(root, "rev-parse", args.rev or "HEAD").strip()
-        record = syncs.get(rev, {"rev": rev, "started": stamp()})
+        record = syncs.get(rev)
+        if record is None and not args.status:
+            sys.exit(f"No sync recorded for {rev[:7]}; give a status to start one.")
+        record = record or {"rev": rev, "started": stamp()}
+    if not args.status:
+        for key, field in (("note", "note"), ("session", "session"), ("session_id", "sessionId"), ("log", "log")):
+            if getattr(args, key):
+                record[field] = getattr(args, key)
+        save_sync(root, record, touch=False)  # a field update isn't news from the session
+        return 0
     if args.status == "running":
         record["branch"] = branch
         # The hook recorded the revision it launched from. If the session
@@ -527,11 +539,13 @@ def cmd_sync(root, config, args):
                 remove_sync(root, other)
     if args.status in ("done", "blocked", "failed"):
         record["finished"] = stamp()
+    else:
+        record.pop("finished", None)  # a new attempt at a revision that failed before
     record["status"] = args.status
     record["note"] = args.note or ""
-    for key in ("session", "log"):
+    for key, field in (("session", "session"), ("session_id", "sessionId"), ("log", "log")):
         if getattr(args, key):
-            record[key] = getattr(args, key)
+            record[field] = getattr(args, key)
     save_sync(root, record)
     print(f"specloop: sync of {record['rev'][:7]} is {args.status}")
     return 0
@@ -668,10 +682,11 @@ def main():
     p = sub.add_parser("mark")
     p.add_argument("rev", nargs="?", default="HEAD")
     p = sub.add_parser("sync")
-    p.add_argument("status", choices=SYNC_STATUSES)
+    p.add_argument("status", nargs="?", choices=SYNC_STATUSES)
     p.add_argument("--rev", help="spec revision the sync implements (default: HEAD, or the running sync on this branch)")
     p.add_argument("--note", help="why it's blocked or failed")
     p.add_argument("--session", help="Claude Code session name")
+    p.add_argument("--session-id", help="Claude Code session ID, for `claude logs`")
     p.add_argument("--log", help="where the launch output went")
     p = sub.add_parser("trigger")
     p.add_argument("--since", help="revision before this update (default: HEAD's first parent)")

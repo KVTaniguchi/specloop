@@ -55,16 +55,28 @@ logs="$(git rev-parse --git-common-dir)/specloop/logs"
 mkdir -p "$logs"
 log="$logs/$short.log"
 
+# A logged-out CLI still launches, then dies inside the session. Say so now.
+if claude auth status 2>/dev/null | grep -q '"loggedIn": *false'; then
+    "$specloop" sync failed --rev HEAD --note "the claude CLI isn't logged in; run claude auth login, then /spec-sync" >/dev/null
+    echo "specloop: the claude CLI isn't logged in (claude auth login) — run /spec-sync manually for $short"
+    exit 0
+fi
+
 "$specloop" sync starting --session "$session" --log "$log" >/dev/null
 if claude --bg \
     --worktree "spec-sync-$short" \
     --name "$session" \
     --permission-mode "$permission" \
     "/spec-sync" >"$log" 2>&1; then
-    echo "specloop: started background session '$session' (tools/specloop status to follow it)"
+    # --bg picks the session ID and prints it ("backgrounded · 9c694670 · …").
+    # Record it without touching the status, which the session may have set by now.
+    id=$(grep -o 'backgrounded[^0-9a-f]*[0-9a-f]\{8\}' "$log" | grep -o '[0-9a-f]\{8\}$' | head -n 1)
+    [ -n "$id" ] && "$specloop" sync --session-id "$id" >/dev/null
+    echo "specloop: started background session '$session' (tools/specloop status to follow it${id:+, claude attach $id to watch})"
 else
-    "$specloop" sync failed --rev HEAD --note "claude --bg failed to launch; see $log" >/dev/null
-    echo "specloop: failed to start session (see $log) — run /spec-sync manually for $short"
+    reason=$(grep -v '^ *$' "$log" | head -n 1)
+    "$specloop" sync failed --rev HEAD --note "claude --bg failed: ${reason:-no output}" >/dev/null
+    echo "specloop: failed to start session: ${reason:-see $log} — run /spec-sync manually for $short"
 fi
 
 exit 0

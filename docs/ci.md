@@ -17,7 +17,7 @@ Each one calls `tools/specloop trigger`, which starts a sync only when all three
 2. the code doesn't match the spec at `HEAD` yet (a pull of an already-synced change starts nothing), and
 3. no other sync is starting or running in this clone.
 
-Every sync has a record in `.git/specloop/syncs/`, outside the work tree, so all worktrees of a clone share it. The hook writes `starting` and sends the launch output to `.git/specloop/logs/<sha>.log`. `/spec-sync` then reports `running`, followed by `done`, `blocked` or `failed`, through `tools/specloop sync <status>`.
+Every sync has a record in `.git/specloop/syncs/`, outside the work tree, so all worktrees of a clone share it. The hook picks the session's ID, writes `starting`, and sends the launch output to `.git/specloop/logs/<sha>.log`. A session that dies after launch usually explains why only in its own output, so `status` points at `claude logs <id>` for those. `/spec-sync` then reports `running`, followed by `done`, `blocked` or `failed`, through `tools/specloop sync <status>`.
 
 `tools/specloop status` turns those records, the ledger and the branches into one line per pending spec revision:
 
@@ -31,7 +31,7 @@ pending:     XP-1, XP-2
 |---|---|
 | not started | nothing has picked it up; run `/spec-sync` |
 | starting | the hook launched a session that hasn't reported in yet |
-| failed to start? | launched over 10 minutes ago and never reported in; see the log |
+| failed to start? | launched over 10 minutes ago and never reported in; `claude logs <id>` shows why |
 | running | `/spec-sync` is working on it |
 | stalled? | running, but no update for `sync.staleAfterMinutes` (default 120) |
 | included | a newer revision's sync covers it |

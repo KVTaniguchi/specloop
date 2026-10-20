@@ -59,6 +59,7 @@ Then:
    ```bash
    git config core.hooksPath tools/githooks
    ```
+   Background sessions need two things the desktop app doesn't give the command-line `claude`: the project folder must be trusted (run `claude` in it once and accept the prompt), and the CLI must be logged in (`claude auth status`, then `claude auth login` if needed). Test the hook without launching anything with `SPEC_SYNC=dry-run git commit …`.
 
 ## Day to day
 

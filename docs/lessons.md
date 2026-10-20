@@ -6,6 +6,24 @@ What happened when specloop was applied to a real project, the fix or open quest
 
 ---
 
+### 2026-10-20 — First end-to-end run of the trigger
+On a toy Python project (not the app), committing a spec change (XP-1 by rarity, new XP-2) started a background session through the hook. In about a minute the session renamed its branch, reported `running`, implemented both rules with tagged tests, reached 3/3 coverage, marked the ledger and reported `done`. `status` showed `awaiting review`. A fast-forward merge brought the ledger to the spec revision, and `post-merge` correctly didn't start another sync. The session's process note said it found nothing surprising. It took three attempts to get there; the next three entries cover why.
+**Takeaway:** the loop works once the environment is right. Every failure was in the environment, not in the skill.
+**Open question:** after `done`, Claude Code leaves the worktree (`.claude/worktrees/spec-sync-<sha>`) in place and locked. A launch that dies also leaves its worktree locked, with a lock naming a process that has exited. Should the sync, the hook or `status` clean these up?
+
+### 2026-10-20 — A background session only starts in a trusted folder
+The first launch failed immediately with "Workspace not trusted". The old hook sent `claude --bg` output to `/dev/null`, so this would have been silent. The new hook reported it, and `status` showed `failed`. After running `claude` in the folder and accepting the prompt, trust still didn't stick for a folder under the system temp directory (`/private/tmp/…`). The cause isn't confirmed. Moving the project to `~/Development` fixed it.
+**Fix:** the README install steps now say to run `claude` in the project once and accept the trust prompt before enabling the trigger.
+**Tool change:** on a launch failure, the hook puts the first line of claude's output in the record and in its own message.
+
+### 2026-10-20 — The CLI's login is separate from the desktop app's
+The second launch started a session that died at once with "Login expired". The desktop app was signed in, but the command-line `claude` that the hook calls was not (`claude auth status` showed `"loggedIn": false`). The reason only appeared in `claude logs <id>`. `status` flagged the sync `failed to start?`, but only after 10 minutes.
+**Tool change:** the hook checks `claude auth status` before launching and fails right away with "run claude auth login". `status` points at `claude logs <id>` for a session that went quiet.
+
+### 2026-10-20 — `claude --bg` ignores `--session-id`
+The hook tried to choose the session ID up front so the record could name it before launch. `--bg` prints a warning and picks its own ID.
+**Tool change:** the hook reads the ID from the launch output (`backgrounded · <id> · …`). It records it with `specloop sync --session-id <id>`, a field-only update that leaves the status alone in case the session has already reported `running`.
+
 ### 2026-10-20 — Moving to the generic skill dropped the app's own sync rules
 The app's original hand-written `/spec-sync` contained project-specific checks: model threshold changes need evaluation numbers, store copy must follow feature changes, never bump the build number, and the Simulator can't check camera features. Replacing it with the generic skill would have dropped all of them without anyone noticing.
 **Fix:** projects keep these in a **"Spec sync rules for this project"** section of `CLAUDE.md`, and the generic skill applies that section on top of its own steps.

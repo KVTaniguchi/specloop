@@ -36,13 +36,22 @@ def test_relabel(): pass
 
 
 class Repo:
-    def __init__(self, path, claude_exit=0):
+    def __init__(self, path, claude_exit=0, logged_in=True):
         self.path = path
         self.calls = path.parent / "claude-calls"
         bin_dir = path.parent / "bin"
         bin_dir.mkdir()
         fake = bin_dir / "claude"
-        fake.write_text(f'#!/bin/sh\necho "$@" >> "{self.calls}"\nexit {claude_exit}\n')
+        launch = (
+            "echo 'Starting background service…'\necho 'backgrounded · 9c694670 · Spec sync'\n"
+            if claude_exit == 0
+            else "echo 'Workspace not trusted. Run `claude` here once.'\n"
+        )
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'if [ "$1" = auth ]; then echo \'{{"loggedIn": {str(logged_in).lower()}}}\'; exit 0; fi\n'
+            f'echo "$@" >> "{self.calls}"\n{launch}exit {claude_exit}\n'
+        )
         fake.chmod(0o755)
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
         self.env.pop("SPEC_SYNC", None)
@@ -259,12 +268,13 @@ class StatusTests(SpecloopTestCase):
 
     def test_quiet_sessions_are_flagged(self):
         repo = self.pending_repo()
-        repo.run("sync", "starting")
+        repo.run("sync", "starting", "--session-id", "fc372a90-b504-4450-a0ca-2bf0de5b093b")
         record_path = next((repo.path / ".git" / "specloop" / "syncs").glob("*.json"))
         record = json.loads(record_path.read_text())
         record["updated"] = "2020-01-01T00:00:00+00:00"
         record_path.write_text(json.dumps(record))
         self.assertIn("failed to start?", self.line(repo))
+        self.assertIn("run `claude logs fc372a90`", self.line(repo))
         self.assertEqual(repo.run("trigger").returncode, 0, "a dead launch shouldn't block a new one")
 
         record["status"] = "running"
@@ -281,6 +291,23 @@ class StatusTests(SpecloopTestCase):
         self.assertRegex(status, rf"{older}\s+included\s+in the sync of")
 
 
+class SyncFieldTests(SpecloopTestCase):
+    def test_field_update_keeps_status_and_time(self):
+        repo = self.repo()
+        repo.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
+        repo.commit("raise scan XP")
+        repo.run("sync", "running")
+        [before] = repo.syncs()
+        self.assertEqual(repo.run("sync", "--session-id", "9c694670").returncode, 0)
+        [after] = repo.syncs()
+        self.assertEqual((after["status"], after["updated"], after["sessionId"]), ("running", before["updated"], "9c694670"))
+
+    def test_field_update_needs_a_record(self):
+        result = self.repo().run("sync", "--session-id", "9c694670")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("No sync recorded", result.output)
+
+
 class HookTests(SpecloopTestCase):
     def test_post_commit_launches_once_and_records_state(self):
         repo = self.repo()
@@ -290,7 +317,10 @@ class HookTests(SpecloopTestCase):
         self.assertIn("started background session", out)
         self.assertEqual(len(repo.claude_calls()), 1)
         self.assertIn("--worktree spec-sync-", repo.claude_calls()[0])
-        self.assertEqual([s["status"] for s in repo.syncs()], ["starting"])
+        [record] = repo.syncs()
+        self.assertEqual(record["status"], "starting")
+        self.assertEqual(record["sessionId"], "9c694670")
+        self.assertIn("claude attach 9c694670", out)
 
         repo.write("docs/SPEC.md", SPEC.replace("10 XP", "13 XP"))
         repo.git("add", "-A")
@@ -302,9 +332,17 @@ class HookTests(SpecloopTestCase):
         repo = self.repo(claude_exit=1)
         repo.enable_hooks()
         repo.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
-        self.assertIn("failed to start session", repo.commit("raise scan XP").output)
+        self.assertIn("failed to start session: Workspace not trusted", repo.commit("raise scan XP").output)
         self.assertEqual([s["status"] for s in repo.syncs()], ["failed"])
-        self.assertIn("failed", repo.run("status").stdout)
+        self.assertIn("failed           claude --bg failed: Workspace not trusted", repo.run("status").stdout)
+
+    def test_logged_out_cli_fails_fast(self):
+        repo = self.repo(logged_in=False)
+        repo.enable_hooks()
+        repo.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
+        self.assertIn("isn't logged in", repo.commit("raise scan XP").output)
+        self.assertEqual(repo.claude_calls(), [])
+        self.assertIn("claude auth login", repo.run("status").stdout)
 
     def test_merge_brings_in_spec_change(self):
         repo = self.repo()
