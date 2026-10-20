@@ -6,10 +6,23 @@ What happened when specloop was applied to a real project, the fix or open quest
 
 ---
 
+### 2026-10-20 — Hooks hand their git variables to everything they start
+The first real test of worktree cleanup failed when it ran from `post-commit`. Run by hand, the same cleanup worked. While a commit hook runs, git sets `GIT_INDEX_FILE=.git/index`, a path relative to the main checkout. Every git command cleanup ran in the sync's worktree inherited it and failed with `.git/index: index file open failed`. The background session the hook launches inherited it too, along with the commit's `GIT_AUTHOR_DATE`. The earlier successful end-to-end run had escaped this only because the hook was run by hand rather than through `git commit`. `post-merge` doesn't set the index variable, so the merge-based tests had passed.
+**Tool change:** the hook unsets git's repository and commit-identity variables first thing, and the CLI strips the repository ones from every git call. Regression tests fail without the fix.
+**Takeaway:** test a hook through the git command that fires it, not by running the script directly.
+
+### 2026-10-20 — Claude Code's worktrees show up in `git status`
+`.claude/worktrees/` was untracked in the main checkout. Claude Code doesn't exclude it, so `git add -A` would stage a running sync's worktree as an embedded repository.
+**Tool change:** before launching, the hook adds `.claude/worktrees/` to the clone's `.git/info/exclude` if it isn't already ignored.
+
+### 2026-10-20 — The worktree lock names the session's process
+While a real sync was running, its worktree lock said `pid 59206`. `claude agents` reported pid 59206 for the session, and that pid was the `claude bg-spare` process. In the previous run, `claude stop` ended that process. So cleanup can rely on the lock: the session has died if its pid is gone, and stopping the session frees the worktree.
+
 ### 2026-10-20 — First end-to-end run of the trigger
 On a toy Python project (not the app), committing a spec change (XP-1 by rarity, new XP-2) started a background session through the hook. In about a minute the session renamed its branch, reported `running`, implemented both rules with tagged tests, reached 3/3 coverage, marked the ledger and reported `done`. `status` showed `awaiting review`. A fast-forward merge brought the ledger to the spec revision, and `post-merge` correctly didn't start another sync. The session's process note said it found nothing surprising. It took three attempts to get there; the next three entries cover why.
 **Takeaway:** the loop works once the environment is right. Every failure was in the environment, not in the skill.
-**Open question:** after `done`, Claude Code leaves the worktree (`.claude/worktrees/spec-sync-<sha>`) in place and locked. A launch that dies also leaves its worktree locked, with a lock naming a process that has exited. Should the sync, the hook or `status` clean these up?
+After `done`, Claude Code leaves the worktree (`.claude/worktrees/spec-sync-<sha>`) in place and locked. A launch that dies also leaves its worktree locked, with a lock naming a process that has exited.
+**Tool change:** `specloop cleanup`, run by the hooks, removes a sync's worktree once its revision is implemented or its session has died. It keeps anything still running, waiting for review, blocked, or carrying uncommitted changes. A session can't remove the worktree it's running in, so cleanup has to happen from outside it. The lock's pid also gives a quicker death signal than the timeouts.
 
 ### 2026-10-20 — A background session only starts in a trusted folder
 The first launch failed immediately with "Workspace not trusted". The old hook sent `claude --bg` output to `/dev/null`, so this would have been silent. The new hook reported it, and `status` showed `failed`. After running `claude` in the folder and accepting the prompt, trust still didn't stick for a folder under the system temp directory (`/private/tmp/…`). The cause isn't confirmed. Moving the project to `~/Development` fixed it.

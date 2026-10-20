@@ -71,12 +71,14 @@ Then:
 | Hotfix code directly | Change code **and** spec in one commit (`SPEC_SYNC=off`), then `tools/specloop mark` |
 | Check test coverage | `tools/specloop coverage` (`--uncovered`, `--require XP,LVL`) |
 | Watch a running sync | `tools/specloop status`, `claude agents`, `claude attach "Spec sync <sha>"` |
+| Review a sync locally | `cd .claude/worktrees/spec-sync-<sha>` (its branch is checked out there) |
+| Clean up sync worktrees | Automatic after a merge; `tools/specloop cleanup` ([details](docs/ci.md#cleaning-up-worktrees)) |
 | Gate CI on the spec | `tools/specloop check` ([CI setup](docs/ci.md)) |
 
 ## Docs
 
 - [Writing a spec](docs/spec-format.md): IDs, good rules, tagging tests in each framework
-- [Sensors and CI](docs/ci.md): how syncs are tracked, and `specloop check` in GitHub Actions
+- [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
 - [Lessons](docs/lessons.md): what happened on a real project
 - [Example: iOS / Swift](examples/ios-swift/)
 

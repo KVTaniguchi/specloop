@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -39,6 +40,8 @@ class Repo:
     def __init__(self, path, claude_exit=0, logged_in=True):
         self.path = path
         self.calls = path.parent / "claude-calls"
+        self.launch_env = path.parent / "launch-env"
+        self.session_pid = path.parent / "session-pid"
         bin_dir = path.parent / "bin"
         bin_dir.mkdir()
         fake = bin_dir / "claude"
@@ -50,7 +53,11 @@ class Repo:
         fake.write_text(
             "#!/bin/sh\n"
             f'if [ "$1" = auth ]; then echo \'{{"loggedIn": {str(logged_in).lower()}}}\'; exit 0; fi\n'
-            f'echo "$@" >> "{self.calls}"\n{launch}exit {claude_exit}\n'
+            f'echo "$@" >> "{self.calls}"\n'
+            f'if [ "$1" = stop ]; then [ -f "{self.session_pid}" ] && kill "$(cat "{self.session_pid}")"; exit 0; fi\n'
+            'if [ "$1" = rm ]; then exit 0; fi\n'
+            f"env | grep '^GIT_' >> \"{self.launch_env}\"\n"
+            f"{launch}exit {claude_exit}\n"
         )
         fake.chmod(0o755)
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
@@ -94,6 +101,47 @@ class Repo:
     def commit(self, message, **env):
         self.git("add", "-A")
         return self.git("commit", "-q", "-m", message, **env)
+
+    def run_in(self, path, *args):
+        result = subprocess.run(
+            [str(path / "tools" / "specloop"), *args], cwd=path, env=self.env, capture_output=True, text=True
+        )
+        result.output = result.stdout + result.stderr
+        return result
+
+    def add_worktree(self, rev, branch, lock_pid=None, reason=None):
+        """A worktree named the way `claude --bg --worktree spec-sync-<sha>` names it."""
+        short = self.git("rev-parse", "--short", rev).stdout.strip()
+        path = self.path / ".claude" / "worktrees" / f"spec-sync-{short}"
+        self.git("worktree", "add", "-q", "-b", branch, str(path), rev)
+        if lock_pid or reason:
+            reason = reason or f"claude session spec-sync-{short} (pid {lock_pid} start Tue Oct 20 21:01:40 2026)"
+            self.git("worktree", "lock", "--reason", reason, str(path))
+        return path, short
+
+    def spec_change(self):
+        """Commit a spec change without launching anything; returns its sha."""
+        self.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
+        self.commit("raise scan XP", SPEC_SYNC="off")
+        return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def finished_sync(self, rev, session_id="abc12345", lock_pid=None):
+        """A sync that built `rev` on its own branch and reported done."""
+        path, short = self.add_worktree(rev, f"worktree-spec-sync-{rev[:7]}")
+        self.git("-C", str(path), "branch", "-m", f"spec-sync/{short}")
+        self.run_in(path, "sync", "running")
+        self.run_in(path, "sync", "--session-id", session_id)
+        (path / "app.py").write_text("XP = 12\n")
+        self.run_in(path, "mark", "HEAD")
+        self.git("-C", str(path), "add", "-A")
+        self.git("-C", str(path), "commit", "-q", "-m", "Spec sync: raise scan XP", SPEC_SYNC="off")
+        self.run_in(path, "sync", "done")
+        if lock_pid:
+            self.git("worktree", "lock", "--reason", f"claude session spec-sync-{short} (pid {lock_pid} start x)", str(path))
+        return path, short
+
+    def branches(self):
+        return self.git("branch", "--format=%(refname:short)").stdout.split()
 
     def enable_hooks(self):
         self.git("config", "core.hooksPath", "tools/githooks")
@@ -308,6 +356,130 @@ class SyncFieldTests(SpecloopTestCase):
         self.assertIn("No sync recorded", result.output)
 
 
+def background_pid(command):
+    """PID of a process that isn't our child, so it is reaped when it exits."""
+    out = subprocess.run(["sh", "-c", f"{command} >/dev/null 2>&1 & echo $!"], capture_output=True, text=True)
+    return int(out.stdout.strip())
+
+
+class CleanupTests(SpecloopTestCase):
+    def live_session(self, repo):
+        pid = background_pid("sleep 60")
+        self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
+        repo.session_pid.write_text(str(pid))
+        return pid
+
+    def dead_pid(self):
+        pid = background_pid("true")
+        time.sleep(0.3)
+        return pid
+
+    def test_merge_cleans_up_the_finished_sync(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev, lock_pid=self.live_session(repo))
+        repo.enable_hooks()
+        out = repo.git("merge", "-q", f"spec-sync/{short}").output
+        self.assertIn(f"removed .claude/worktrees/spec-sync-{short} (implemented; deleted spec-sync/{short})", out)
+        self.assertFalse(path.exists())
+        self.assertNotIn(f"spec-sync/{short}", repo.branches())
+        self.assertEqual(repo.syncs(), [])
+        self.assertEqual(repo.claude_calls(), ["stop abc12345", "rm abc12345"])
+
+    def test_next_commit_cleans_up_a_merged_sync(self):
+        # post-commit runs with GIT_INDEX_FILE=.git/index, which broke removal.
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev, lock_pid=self.dead_pid())
+        repo.git("merge", "-q", f"spec-sync/{short}")
+        repo.enable_hooks()
+        repo.write("README.md", "hi")
+        out = repo.commit("docs").output
+        self.assertIn(f"removed .claude/worktrees/spec-sync-{short} (implemented; deleted spec-sync/{short})", out)
+        self.assertFalse(path.exists())
+
+    def test_awaiting_review_is_kept(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev, lock_pid=self.live_session(repo))
+        self.assertEqual(repo.run("cleanup").output, "")
+        self.assertTrue(path.exists())
+        self.assertNotIn("worktrees:", repo.run("status").stdout)
+
+    def test_dead_launch_is_cleaned_up(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        repo.run("sync", "starting", "--session-id", "deadbeef")
+        path, short = repo.add_worktree(rev, f"worktree-spec-sync-{rev[:7]}", lock_pid=self.dead_pid())
+        self.assertIn("worktrees:   1 left over", repo.run("status").stdout)
+
+        out = repo.run("cleanup").output
+        self.assertIn(f"removed .claude/worktrees/spec-sync-{short} (ended without finishing; deleted worktree-spec-sync-", out)
+        self.assertFalse(path.exists())
+        self.assertEqual(repo.branches(), ["main"])
+        self.assertEqual(repo.claude_calls(), ["rm deadbeef"])
+        self.assertIn("failed           the session ended without reporting", repo.run("status").stdout)
+
+    def test_dead_session_with_commits_keeps_its_branch(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        repo.run("sync", "starting")
+        path, short = repo.add_worktree(rev, f"spec-sync/{rev[:7]}", lock_pid=self.dead_pid())
+        (path / "app.py").write_text("XP = 12\n")
+        repo.git("-C", str(path), "add", "-A")
+        repo.git("-C", str(path), "commit", "-q", "-m", "partial", SPEC_SYNC="off")
+        out = repo.run("cleanup").output
+        self.assertIn(f"kept spec-sync/{rev[:7]}, which has unmerged commits", out)
+        self.assertFalse(path.exists())
+        self.assertIn(f"spec-sync/{rev[:7]}", repo.branches())
+
+    def test_running_session_is_kept(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.add_worktree(rev, f"spec-sync/{rev[:7]}", lock_pid=self.live_session(repo))
+        repo.run_in(path, "sync", "running")
+        self.assertEqual(repo.run("cleanup").output, "")
+        self.assertTrue(path.exists())
+        self.assertEqual(repo.claude_calls(), [])
+
+    def test_uncommitted_changes_are_kept(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev)
+        repo.git("merge", "-q", f"spec-sync/{short}")
+        (path / "notes.txt").write_text("wip\n")
+        self.assertIn("it has uncommitted changes", repo.run("cleanup").output)
+        self.assertTrue(path.exists())
+
+    def test_foreign_lock_is_kept(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev)
+        repo.git("worktree", "lock", "--reason", "reviewing on the train", str(path))
+        repo.git("merge", "-q", f"spec-sync/{short}")
+        self.assertIn("locked (reviewing on the train)", repo.run("cleanup").output)
+        self.assertTrue(path.exists())
+
+    def test_dry_run_changes_nothing(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev)
+        repo.git("merge", "-q", f"spec-sync/{short}")
+        self.assertIn(f"would remove .claude/worktrees/spec-sync-{short} (implemented)", repo.run("cleanup", "--dry-run").output)
+        self.assertTrue(path.exists())
+        self.assertEqual(len(repo.syncs()), 1)
+
+    def test_other_worktrees_are_ignored(self):
+        repo = self.repo()
+        path = repo.path.parent / "my-feature"
+        repo.git("worktree", "add", "-q", "-b", "feature", str(path))
+        repo.spec_change()
+        repo.run("mark")
+        repo.commit("ledger")
+        self.assertEqual(repo.run("cleanup").output, "")
+        self.assertTrue(path.exists())
+
+
 class HookTests(SpecloopTestCase):
     def test_post_commit_launches_once_and_records_state(self):
         repo = self.repo()
@@ -321,6 +493,11 @@ class HookTests(SpecloopTestCase):
         self.assertEqual(record["status"], "starting")
         self.assertEqual(record["sessionId"], "9c694670")
         self.assertIn("claude attach 9c694670", out)
+
+        leaked = [v for v in repo.launch_env.read_text().split() if v.split("=")[0] in (
+            "GIT_INDEX_FILE", "GIT_DIR", "GIT_WORK_TREE", "GIT_AUTHOR_DATE", "GIT_COMMITTER_DATE")]
+        self.assertEqual(leaked, [], "the session must not inherit the commit's git variables")
+        self.assertEqual(repo.git("check-ignore", ".claude/worktrees/spec-sync-abc").returncode, 0)
 
         repo.write("docs/SPEC.md", SPEC.replace("10 XP", "13 XP"))
         repo.git("add", "-A")

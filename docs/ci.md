@@ -42,6 +42,24 @@ pending:     XP-1, XP-2
 
 A launch that went quiet (`failed to start?`, `stalled?`) no longer stops the hook from starting a new sync.
 
+## Cleaning up worktrees
+
+Each sync runs in a worktree that Claude Code creates and locks: `.claude/worktrees/spec-sync-<sha>`. Claude Code doesn't remove it when the session finishes. While a sync waits for review, its branch is checked out there, so you can `cd` into it to run the change, or `claude attach` to the session to ask about it.
+
+`tools/specloop cleanup` removes these worktrees once they're no longer needed, and the hooks run it after every commit, merge and rebase. A worktree goes when either:
+- **the sync is implemented:** the ledger has reached its revision, usually because you merged its branch. Its session is stopped first if it's still open.
+- **its session ended without finishing:** the sync failed, or the process holding the worktree's lock has exited while the sync still said starting or running. The record becomes `failed`, so `status` still shows that the revision needs a sync.
+
+It never touches:
+- worktrees with any other name
+- a sync that's running, waiting for review, or blocked on a question (you can still attach and answer it)
+- a worktree with uncommitted changes
+- a worktree locked by anything other than a Claude Code session
+
+The branch is deleted when it's merged or has no commits of its own. Otherwise it's kept and the message says so. A squash-merged branch is one example. `claude rm` then clears the session from `claude agents`.
+
+`status` reports leftover worktrees, and `cleanup --dry-run` shows what would go. `SPEC_SYNC=dry-run` also makes the hooks dry-run their cleanup.
+
 ## `specloop check`
 
 `specloop check` gathers the checks a build should enforce and exits 1 if any of them fails:

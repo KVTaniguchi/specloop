@@ -11,10 +11,19 @@
 #
 # Enable once per clone:   git config core.hooksPath tools/githooks
 # Skip for one update:     SPEC_SYNC=off git commit ...   (or merge, pull)
-# Test without launching:  SPEC_SYNC=dry-run git commit ...
+# Test without launching:  SPEC_SYNC=dry-run git commit ...   (also dry-runs cleanup)
 # Watch / attach:          tools/specloop status   |   claude agents
 
 [ "$SPEC_SYNC" = "off" ] && exit 0
+
+# Git runs hooks with variables about the commit in progress, some relative
+# to this checkout (GIT_INDEX_FILE=.git/index in post-commit). Left in place
+# they break git in the sync's worktree, and they'd stamp the sync's commit
+# with this commit's date. Hooks run at the top of the work tree, so git
+# finds the repository without them.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_REFLOG_ACTION \
+    GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE \
+    GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
 
 mode=${1:-commit}
 root=$(git rev-parse --show-toplevel)
@@ -30,6 +39,13 @@ if [ "$mode" = commit ] && { [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/re
     exit 0
 fi
 case "$(git rev-parse --abbrev-ref HEAD)" in "$prefix"*) exit 0 ;; esac
+
+# Clear out worktrees of syncs that are merged or whose session died.
+if [ "$SPEC_SYNC" = "dry-run" ]; then
+    "$specloop" cleanup --dry-run
+else
+    "$specloop" cleanup --quiet
+fi
 
 if [ "$mode" = commit ]; then
     "$specloop" trigger || exit 0
@@ -51,9 +67,17 @@ if [ "$SPEC_SYNC" = "dry-run" ]; then
     exit 0
 fi
 
-logs="$(git rev-parse --git-common-dir)/specloop/logs"
+common=$(git rev-parse --git-common-dir)
+logs="$common/specloop/logs"
 mkdir -p "$logs"
 log="$logs/$short.log"
+
+# Claude Code doesn't hide its worktrees from git, so a `git add -A` here
+# would stage one as an embedded repository. Exclude them in this clone.
+if ! git check-ignore -q ".claude/worktrees/spec-sync-$short"; then
+    mkdir -p "$common/info"
+    printf '.claude/worktrees/\n' >> "$common/info/exclude"
+fi
 
 # A logged-out CLI still launches, then dies inside the session. Say so now.
 if claude auth status 2>/dev/null | grep -q '"loggedIn": *false'; then

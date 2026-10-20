@@ -73,6 +73,7 @@ Always record one of `done`, `blocked` or `failed` before you finish. Otherwise 
 ## 6. Report
 
 Keep it short:
+- the branch to review, and that it's checked out in this worktree (`git rev-parse --show-toplevel`) if the hook started you. The worktree is removed automatically once the branch is merged.
 - what changed, by rule ID
 - test and coverage results
 - anything you couldn't verify
