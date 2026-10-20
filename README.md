@@ -35,7 +35,7 @@ edit docs/SPEC.md ──► git commit
 Requirements: git, Python 3.8+ (standard library only), [Claude Code](https://claude.com/claude-code) for the skills and trigger.
 
 ```bash
-git clone <this repo> ~/specloop
+git clone https://github.com/KVTaniguchi/specloop.git ~/specloop
 ~/specloop/install.sh /path/to/your/project
 ```
 
