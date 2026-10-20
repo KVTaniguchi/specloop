@@ -16,15 +16,15 @@ While moving the app over, coverage briefly reported 0/82 because the config was
 **Fix:** `specloop coverage` now warns on stderr when it scans no test files at all.
 **Tool change:** done.
 
-### 2026-10-18 — The code-first rule held without anyone enforcing it
-Two days after the baseline, a layout-only change for small and wide screens (onboarding, the success sheet, grid columns) went straight to code. The commit message ended with "Layout only; no spec change." The session that made it had read the CLAUDE.md rule and decided, correctly, that the spec described behavior, not layout.
-**Takeaway:** writing "no spec change" in the commit message makes the decision visible and checkable later.
-**Tool change:** the app's CLAUDE.md now asks for that line. **Open question:** should a `commit-msg` hook warn when app code changes with neither a spec change nor a "no spec change" note?
-
 ### 2026-10-20 — Editing a table row didn't register as a rule change
 While testing specloop against the app, changing one cell in the XP table (`Common | 10` → `12`) produced an empty `pending --ids`. The table's ID sits on the line *above* the table, so the changed line itself names no ID. A sync would have had to work out which rule the change touched.
 **Fix:** a changed line belongs to the nearest ID defined at or above it, up to the next heading. Table rows, continuation lines and sub-bullets now count toward their rule.
 **Tool change:** `specloop pending --ids` and `status` use that ownership rule.
+
+### 2026-10-18 — The code-first rule held without anyone enforcing it
+Two days after the baseline, a layout-only change for small and wide screens (onboarding, the success sheet, grid columns) went straight to code. The commit message ended with "Layout only; no spec change." The session that made it had read the CLAUDE.md rule and decided, correctly, that the spec described behavior, not layout.
+**Takeaway:** writing "no spec change" in the commit message makes the decision visible and checkable later.
+**Tool change:** the app's CLAUDE.md now asks for that line. **Open question:** should a `commit-msg` hook warn when app code changes with neither a spec change nor a "no spec change" note?
 
 ### 2026-10-17 — Rules buried in views can't be tested
 After the spec was drafted, about a third of the §2 game rules lived inside SwiftUI views as private functions: XP-on-relabel, achievements, the "Cat Presence" label, and confidence routing. The coverage report showed them as ✗, and no test could reach them. A second pass moved them into plain model types first (behavior unchanged), then tested them. Coverage went from 14/82 to 26/82.
