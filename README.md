@@ -106,6 +106,7 @@ Then:
 
 - [Writing a spec](docs/spec-format.md): the tree, IDs, good rules, tagging tests in each framework
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
+- [Attribution and feedback](docs/attribution.md): proposed design for tracing problems back to rules and harness versions
 - [Lessons](docs/lessons.md): what happened on a real project
 - [Example: iOS / Swift](examples/ios-swift/)
 
