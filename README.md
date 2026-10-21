@@ -14,6 +14,7 @@ Tools like GitHub Spec Kit and Kiro focus on the step from spec to plan to code.
 - **Traceability.** Every rule has a stable ID. Every test names the IDs it checks. `specloop coverage` maps the two and fails when a test names an ID the spec no longer defines.
 - **Two-way discipline.** Spec edits drive code changes. When the code changes first, the spec is updated in the same commit.
 - **No collisions.** The trigger runs locally, on the machine of whoever wrote the spec change. Everyone else who pulls the same merge sees it in `status` but doesn't build it too.
+- **Attribution.** Every code commit names its rules, their versions and the harness that built it in trailers. `specloop blame` follows a crash or a failing test back to them, and `/spec-triage` decides whether the spec, the code, the tests or the harness needs the fix.
 - **Sensors.** The hooks notice a spec change however it arrives (commit, merge, pull, rebase). `specloop status` shows where each pending revision stands, and `specloop check` fails CI when the spec and the code drift apart.
 
 ## The spec tree
@@ -60,10 +61,11 @@ This copies the following into your project, without overwriting anything you al
 
 | File | Purpose |
 |---|---|
-| `tools/specloop` | CLI: `status`, `pending`, `coverage`, `check`, `mark`, `sync`, `trigger`, `config` |
-| `tools/githooks/` | Trigger: `post-commit`, `post-merge` and `post-rewrite` start `/spec-sync` when the spec changes |
+| `tools/specloop` | CLI: `status`, `pending`, `coverage`, `check`, `mark`, `sync`, `trigger`, `config`, and for feedback `trailers`, `blame`, `signal`, `signals` |
+| `tools/githooks/` | Trigger: `post-commit`, `post-merge` and `post-rewrite` start `/spec-sync` when the spec changes. `commit-msg` checks trailers, if you turn it on |
 | `.claude/skills/spec-sync/` | Builds a pending spec diff. Cursor reads `.claude/skills/` too, so `/spec-sync` works in both. |
 | `.claude/skills/spec-init/` | Drafts the first spec from existing code |
+| `.claude/skills/spec-triage/` | Traces a crash, failing test, QA report or review comment to its rules and harness, and proposes which layer to fix |
 | `specloop.json` | Spec path, test dirs and tag styles, test command |
 | `docs/spec/` | Overview and feature templates, only if you don't have a spec |
 
@@ -101,12 +103,16 @@ Then:
 | Review a sync locally | `cd .claude/worktrees/spec-sync-<sha>` (Claude Code) or `.specloop/worktrees/spec-sync-<sha>` (Cursor); its branch is checked out there |
 | Clean up sync worktrees | Automatic after a merge; `tools/specloop cleanup` ([details](docs/ci.md#cleaning-up-worktrees)) |
 | Gate CI on the spec | `tools/specloop check` ([CI setup](docs/ci.md)) |
+| Commit code by hand | End the message with `tools/specloop trailers --rules XP-6 --human`, or `--none deps` |
+| Find what built a line | `tools/specloop blame src/xp.swift:42` (also `--test`, `--rule`, `--commit`) |
+| Report a crash, bug or review comment | `/spec-triage` with the evidence; `tools/specloop signals` lists open ones |
+| See whether a harness change helped | `tools/specloop signals --by harness` |
 
 ## Docs
 
 - [Writing a spec](docs/spec-format.md): the tree, IDs, good rules, tagging tests in each framework
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
-- [Attribution and feedback](docs/attribution.md): proposed design for tracing problems back to rules and harness versions
+- [Attribution and feedback](docs/attribution.md): commit trailers, blame, signals and triage
 - [Lessons](docs/lessons.md): what happened on a real project
 - [Example: iOS / Swift](examples/ios-swift/)
 

@@ -7,6 +7,8 @@
 - `docs/.spec-implemented` holds the commit whose spec the code matches. Only `/spec-sync` advances it, or `tools/specloop mark` after a hand-made spec+code commit.
 - Tests name the spec IDs they check at the start of their name, e.g. `@Test("XP-6: …")`. `tools/specloop coverage` reports which IDs have tests and fails on IDs the spec doesn't define.
 - Any direct code change that alters behavior must update the spec in the same commit.
+- **Every commit that changes code names its rules in trailers.** `tools/specloop trailers --rules ID,... --human` prints the block for a hand-written commit (or `--model <id>` instead of `--human` for an agent session); paste it at the end of the message. A commit no rule covers says why: `Spec-Rules: none (deps)`. Use `none (format)`, `none (rename)` or `none (move)` for changes that only move code, so `specloop blame` looks past them.
+- **Feedback about the code is a signal.** For a crash, a failing test, a QA report or a review comment, run `/spec-triage` to trace it to its rules and harness and find which layer to fix.
 
 ### Spec sync rules for this project
 

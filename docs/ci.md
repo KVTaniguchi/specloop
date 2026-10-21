@@ -76,6 +76,7 @@ The branch is deleted when it's merged or has no commits of its own. Otherwise i
 - no test names an ID the spec doesn't define (stale tags)
 - every ID under the required prefixes (`sync.require`, or `--require`) has a test
 - the ledger names a commit in this clone, and the code matches the spec at `HEAD`
+- with `--trailers RANGE`: every commit in the range that changes code has a `Spec-Rules` trailer naming rules the spec defines at that commit, or `none (reason)`. Merge commits are skipped, and so are commits that only touch the spec, the ledger, the signals, or `trailers.exempt` (default `*.md`, `LICENSE`, `.gitignore`). See [attribution](attribution.md#1-commit-trailers).
 
 A spec ahead of the code is an error by default. That's the state "the spec was merged but nothing built it". Pass `--allow-pending` to downgrade it to a warning, for example on pull requests that only change the spec.
 
@@ -101,5 +102,19 @@ To let spec-only pull requests through while still gating the default branch:
 ```yaml
       - run: tools/specloop check --format github ${{ github.event_name == 'pull_request' && '--allow-pending' || '' }}
 ```
+
+To check trailers too: on a pull request, the PR's own commits; on a push, what the push brought in, which catches a squash merge that dropped them.
+
+```yaml
+      - run: |
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            range="origin/${{ github.base_ref }}..HEAD"
+          else
+            range="${{ github.event.before }}..${{ github.sha }}"
+          fi
+          tools/specloop check --format github --trailers "$range"
+```
+
+The same check runs locally on each commit if you set `"trailers": {"hook": true}` in `specloop.json` and have the hooks enabled (`core.hooksPath tools/githooks`). `git commit --no-verify` skips it once.
 
 `check` only reads tags and history. It doesn't run your tests, so run your test command as its own step.

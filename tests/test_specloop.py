@@ -6,6 +6,7 @@ records how it was called.
     python3 -m unittest discover tests
 """
 
+import hashlib
 import json
 import os
 import shutil
@@ -109,7 +110,7 @@ class Repo:
         self.git("config", "commit.gpgsign", "false")
         (path / "tools" / "githooks").mkdir(parents=True)
         shutil.copy(HERE / "bin" / "specloop", path / "tools" / "specloop")
-        for hook in ("specloop-trigger", "post-commit", "post-merge", "post-rewrite"):
+        for hook in ("specloop-trigger", "post-commit", "post-merge", "post-rewrite", "commit-msg"):
             shutil.copy(HERE / "hooks" / hook, path / "tools" / "githooks" / hook)
         config = {"tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}
         if tree:
@@ -831,6 +832,250 @@ class CursorTests(SpecloopTestCase):
         repo.change_spec()
         self.assertIn("would start background cursor session", repo.commit("raise", SPEC_SYNC="dry-run").output)
         self.assertEqual(repo.agent_runs(), [])
+
+
+def version(rule_line):
+    """A rule's version as specloop computes it, from its one line of text."""
+    return hashlib.sha1(" ".join(rule_line.split()).encode()).hexdigest()[:6]
+
+
+XP1 = version("- **XP-1:** A scan pays 10 XP.")
+XP1_NEW = version("- **XP-1:** A scan pays 12 XP.")
+XP2 = version("- **XP-2:** A relabel pays the scanner's XP.")
+
+SYNC_MESSAGE = f"""Spec sync: scan XP
+
+Spec-Rev: 9f8e7d6c2b1a
+Spec-Rules: XP-1@{XP1}
+Harness: claude-code claude-opus-5-5
+Harness-Rev: spec-sync@111111
+Sync: 9f8e7d6
+"""
+
+
+def built_by_sync(repo, text='NAME = "scan"\nXP = 10\n'):
+    """Code committed the way /spec-sync commits it; returns its sha."""
+    repo.write("app.py", text)
+    repo.commit(SYNC_MESSAGE)
+    return repo.git("rev-parse", "HEAD").stdout.strip()
+
+
+class TrailerTests(SpecloopTestCase):
+    def test_sync_names_its_rules_and_harness_before_and_after_mark(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.add_worktree(rev, "worktree-spec-sync")
+        repo.git("-C", str(path), "branch", "-m", f"spec-sync/{short}")
+        repo.run_in(path, "sync", "running")
+        (path / "CLAUDE.md").write_text("# Project\n")
+        before = repo.run_in(path, "trailers", "--model", "claude-opus-5-5")
+        self.assertEqual(before.returncode, 0, before.output)
+        self.assertIn(f"Spec-Rev: {rev[:12]}\nSpec-Rules: XP-1@{XP1_NEW}\nHarness: claude-code claude-opus-5-5\n", before.stdout)
+        self.assertRegex(before.stdout, r"Harness-Rev: claude-md@[0-9a-f]{6}\n")
+        self.assertIn(f"Sync: {short}", before.stdout)
+        repo.run_in(path, "mark", "HEAD")
+        self.assertEqual(repo.run_in(path, "trailers", "--model", "claude-opus-5-5").stdout, before.stdout)
+
+    def test_pending_change_without_a_sync(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        out = repo.run("trailers", "--human").stdout
+        self.assertEqual(out, f"Spec-Rev: {rev[:12]}\nSpec-Rules: XP-1@{XP1_NEW}\nHarness: human\n")
+
+    def test_nothing_pending_needs_rules_or_none(self):
+        repo = self.repo()
+        result = repo.run("trailers")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("--rules ID", result.output)
+        self.assertIn(f"Spec-Rules: XP-2@{XP2}\nHarness: human", repo.run("trailers", "--rules", "XP-2", "--human").stdout)
+        self.assertIn("doesn't define XP-9", repo.run("trailers", "--rules", "XP-9").output)
+        self.assertIn("Spec-Rules: none (deps)\n", repo.run("trailers", "--none", "deps", "--human").stdout)
+
+
+class TrailerCheckTests(SpecloopTestCase):
+    def check_commit(self, message, name="app.py"):
+        repo = self.repo()
+        base = repo.git("rev-parse", "HEAD").stdout.strip()
+        repo.write(name, "XP = 10\n")
+        repo.commit(message)
+        return repo.run("check", "--trailers", f"{base}..HEAD")
+
+    def test_code_commit_without_trailers_fails(self):
+        result = self.check_commit("add app")
+        self.assertEqual(result.returncode, 1, result.output)
+        self.assertIn("(add app) changes code without a Spec-Rules trailer", result.output)
+
+    def test_named_rules_pass(self):
+        result = self.check_commit("add app\n\nSpec-Rules: XP-1\nHarness: human\n")
+        self.assertEqual(result.returncode, 0, result.output)
+
+    def test_none_needs_a_reason(self):
+        self.assertIn("without a reason in brackets", self.check_commit("bump\n\nSpec-Rules: none\n").output)
+
+    def test_none_with_a_reason_passes(self):
+        self.assertEqual(self.check_commit("bump\n\nSpec-Rules: none (deps)\n").returncode, 0)
+
+    def test_unknown_rule_fails(self):
+        result = self.check_commit("add app\n\nSpec-Rules: XP-9, oops\n")
+        self.assertIn("names XP-9 in Spec-Rules, which the spec there doesn't define", result.output)
+        self.assertIn("has 'oops' in Spec-Rules", result.output)
+
+    def test_docs_only_commit_needs_none(self):
+        self.assertEqual(self.check_commit("notes", name="NOTES.md").returncode, 0)
+
+    def test_trailers_mid_body_count(self):
+        # How GitHub squashes a PR of several commits.
+        message = "Scan XP (#12)\n\n* Spec sync: scan XP\n\nSpec-Rules: XP-1\n\n* review fixes\n"
+        self.assertEqual(self.check_commit(message).returncode, 0)
+
+    def test_commit_msg_hook_is_opt_in(self):
+        repo = self.repo()
+        repo.enable_hooks()
+        repo.write("app.py", "XP = 10\n")
+        self.assertEqual(repo.commit("add app").returncode, 0)
+
+        repo.write("specloop.json", json.dumps({"tests": {"paths": ["tests"]}, "trailers": {"hook": True}}))
+        repo.commit("turn on the trailer hook\n\nSpec-Rules: none (config)\n")
+        repo.write("app.py", "XP = 11\n")
+        repo.git("add", "-A")
+        refused = repo.git("commit", "-q", "-m", "change app", check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("This commit changes code without a Spec-Rules trailer", refused.output)
+        self.assertEqual(repo.git("commit", "-q", "-m", "change app\n\nSpec-Rules: XP-1\n", check=False).returncode, 0)
+
+
+class BlameTests(SpecloopTestCase):
+    def test_line_traces_to_its_rules_harness_and_tests(self):
+        repo = self.repo()
+        sha = built_by_sync(repo)
+        out = repo.run("blame", "app.py:2").stdout
+        self.assertIn(f"{sha[:7]}", out)
+        self.assertIn(f"spec     9f8e7d6  XP-1@{XP1} (current: {XP1}, unchanged)", out)
+        self.assertIn("harness  claude-code claude-opus-5-5  spec-sync@111111", out)
+        self.assertIn("sync     9f8e7d6", out)
+        self.assertIn("test     tests/test_rules.py:1  # Spec: XP-1", out)
+
+    def test_rule_reworded_since(self):
+        repo = self.repo()
+        built_by_sync(repo)
+        repo.spec_change()
+        self.assertIn(f"XP-1@{XP1} (current: {XP1_NEW}, changed since)", repo.run("blame", "app.py:2").stdout)
+
+    def test_looks_past_format_commits(self):
+        repo = self.repo()
+        sha = built_by_sync(repo)
+        repo.write("app.py", "NAME = 'scan'\nXP = 10\n")
+        repo.commit("quote style\n\nSpec-Rules: none (format)\n")
+        out = repo.run("blame", "app.py:1").stdout
+        self.assertIn(f"{sha[:7]}", out.splitlines()[1])
+        self.assertIn("(looked past", out)
+        self.assertIn("format: quote style", out)
+
+    def test_commit_without_trailers_says_so(self):
+        repo = self.repo()
+        repo.write("app.py", "XP = 10\n")
+        repo.commit("add app")
+        self.assertIn("no trailers", repo.run("blame", "app.py:1").stdout)
+
+    def test_rule_test_and_commit_queries(self):
+        repo = self.repo()
+        sha = built_by_sync(repo)
+        self.assertIn(sha[:7], repo.run("blame", "--rule", "XP-1").stdout)
+        self.assertIn("no commit's Spec-Rules names XP-2", repo.run("blame", "--rule", "XP-2").stdout)
+        self.assertIn(f"rules    XP-1 (current: {XP1})", repo.run("blame", "--test", "Spec: XP-1").stdout)
+        self.assertIn("harness  claude-code", repo.run("blame", "--commit", sha).stdout)
+
+    def test_json(self):
+        repo = self.repo()
+        built_by_sync(repo)
+        found = json.loads(repo.run("blame", "app.py:2", "--json").stdout)
+        self.assertEqual(found["rules"], [["XP-1", XP1]])
+        self.assertEqual(found["commits"][0]["sync"], "9f8e7d6")
+
+    def test_missing_line(self):
+        repo = self.repo()
+        built_by_sync(repo)
+        result = repo.run("blame", "app.py:99")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("isn't a line of a committed file", result.stdout)
+
+
+class SignalTests(SpecloopTestCase):
+    def add(self, repo, *args, evidence=None):
+        if evidence is not None:
+            path = repo.path.parent / "evidence.txt"
+            path.write_text(evidence)
+            args = (*args, "--evidence", str(path))
+        return repo.run("signal", "add", *args)
+
+    def signals(self, repo):
+        return [json.loads(p.read_text()) for p in (repo.path / "docs" / "signals").glob("*.json")]
+
+    def test_crash_is_attributed_through_blame(self):
+        repo = self.repo()
+        sha = built_by_sync(repo)
+        trace = "EXC_BAD_ACCESS\n  0 apply (/build/checkout/app.py:2)\n  1 main (lib/missing.py:4)\n"
+        result = self.add(repo, "--source", "crash", "--summary", "Crash applying XP", evidence=trace)
+        self.assertEqual(result.returncode, 0, result.output)
+        [record] = self.signals(repo)
+        self.assertRegex(record["id"], r"^sig-\d{8}-[0-9a-f]{6}$")
+        self.assertEqual(record["locus"], ["app.py:2"])
+        self.assertEqual(record["fingerprint"], "crash:app.py:2")
+        self.assertEqual(record["attribution"]["rules"], [f"XP-1@{XP1}"])
+        self.assertEqual(record["attribution"]["commits"], [sha[:12]])
+        self.assertEqual(record["attribution"]["harness"], "claude-code claude-opus-5-5")
+        self.assertEqual(record["attribution"]["harness_rev"], "spec-sync@111111")
+
+    def test_repeat_joins_the_open_signal(self):
+        repo = self.repo()
+        built_by_sync(repo)
+        self.add(repo, "--source", "crash", "--summary", "Crash", "--locus", "app.py:2")
+        again = self.add(repo, "--source", "crash", "--summary", "Crash again", "--locus", "app.py:2")
+        self.assertIn("same as open signal", again.stdout)
+        [record] = self.signals(repo)
+        self.assertEqual(len(record["duplicates"]), 1)
+
+    def test_rule_without_a_locus(self):
+        repo = self.repo()
+        self.add(repo, "--source", "qa", "--summary", "Relabel pays too little", "--rule", "XP-2")
+        [record] = self.signals(repo)
+        self.assertEqual(record["attribution"]["rules"], [f"XP-2@{XP2}"])
+        self.assertEqual(record["attribution"]["traced_by"], "none")
+
+    def test_triage_confirm_resolve_and_reports(self):
+        repo = self.repo()
+        self.add(repo, "--source", "qa", "--summary", "Relabel pays too little", "--rule", "XP-2")
+        [record] = self.signals(repo)
+        bad = repo.run("signal", "triage", record["id"], "--layer", "spec", "--kind", "misread",
+                       "--confidence", "low", "--reasoning", "x")
+        self.assertIn("kind is one of wrong, ambiguous, missing-rule", bad.output)
+        repo.run("signal", "triage", record["id"][:12], "--layer", "spec", "--kind", "ambiguous",
+                 "--confidence", "medium", "--reasoning", "XP-2 doesn't say which scanner")
+        self.assertIn("spec/ambiguous ?", repo.run("signals").stdout)
+        unconfirmed = repo.run("signals", "--by", "layer").stdout
+        self.assertIn("No confirmed signals yet.", unconfirmed)
+        self.assertIn("1 signal without confirmed triage", unconfirmed)
+
+        repo.run("signal", "confirm", record["id"])
+        self.assertEqual(self.signals(repo)[0]["triage"]["confirmed_by"], "test@example.com")
+        self.assertIn("spec              1   ambiguous 1", repo.run("signals", "--by", "layer").stdout)
+        self.assertIn(record["id"], repo.run("signals", "--rule", "XP-2").stdout)
+
+        repo.run("signal", "resolve", record["id"], "--status", "fixed", "--fix", "spec PR #4")
+        self.assertIn("No open signals.", repo.run("signals").stdout)
+        self.assertIn("[fixed]", repo.run("signals", "--all").stdout)
+
+    def test_harness_pattern_reaches_the_threshold(self):
+        repo = self.repo()
+        built_by_sync(repo)
+        for n in range(3):
+            self.add(repo, "--source", "review", "--summary", f"Wrong XP {n}", "--locus", "app.py:2", "--fingerprint", f"r{n}")
+        for record in self.signals(repo):
+            repo.run("signal", "triage", record["id"], "--layer", "implementation", "--kind", "misread",
+                     "--confidence", "high", "--reasoning", "XP-1 is clear", "--confirm")
+        out = repo.run("signals", "--by", "harness").stdout
+        self.assertRegex(out, r"claude-code claude-opus-5-5 +spec-sync@111111 +1 +3 +3\.00")
+        self.assertIn("pattern: 3 confirmed implementation/misread signals under spec-sync@111111", out)
 
 
 if __name__ == "__main__":

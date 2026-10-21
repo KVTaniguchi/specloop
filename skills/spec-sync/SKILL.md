@@ -58,10 +58,12 @@ tools/specloop coverage --ids "$(tools/specloop pending --ids | paste -sd, -)"
 ## 5. Commit
 
 ```bash
-tools/specloop mark HEAD     # before making your own commit; HEAD is the spec revision you implemented
+tools/specloop mark HEAD                         # before making your own commit; HEAD is the spec revision you implemented
+tools/specloop trailers --model <your model ID>  # the trailer block for this sync's commit
 ```
 
-- Make one commit with the code, the tests and the ledger. Use the message `Spec sync: <one-line summary>` and list the rule IDs in the body.
+- Make one commit with the code, the tests and the ledger. Use the message `Spec sync: <one-line summary>`, then a body saying what changed by rule ID, then a blank line and the trailer block **exactly as `trailers` printed it**. The trailers are how a later crash or review comment is traced back to these rules and to this harness, so don't edit or drop them.
+- `--model` is the model ID you're running as (e.g. `claude-opus-5-5`). Leave it out only if you don't know it.
 - **Don't** push or merge into the default branch. The user reviews and merges.
 
 Then record the outcome:
@@ -77,7 +79,7 @@ Always record one of `done`, `blocked` or `failed` before you finish. Otherwise 
 
 Keep it short:
 - the branch to review, and that it's checked out in this worktree (`git rev-parse --show-toplevel`) if the hook started you. The worktree is removed automatically once the branch is merged.
-- to share it as a pull request, the user pushes the branch; you don't
+- to share it as a pull request, the user pushes the branch; you don't. Give them a PR description that ends with the same trailer block, because a squash merge of a one-commit PR can use the description as the commit message.
 - what changed, by rule ID
 - test and coverage results
 - anything you couldn't verify

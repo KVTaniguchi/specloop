@@ -14,5 +14,13 @@
     "permissionMode": "auto",
     "trigger": "mine",
     "harness": "claude"
+  },
+  "signals": "docs/signals",
+  "trailers": {
+    "exempt": ["*.md", "LICENSE", ".gitignore"],
+    "hook": false
+  },
+  "feedback": {
+    "harnessThreshold": 3
   }
 }

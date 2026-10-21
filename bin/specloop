@@ -20,6 +20,20 @@ specloop — keep a spec, the code, and the tests in lockstep.
                                      (claude or cursor)
     specloop config [KEY]            print config (dotted KEY, e.g. sync.branchPrefix)
 
+  Attribution and feedback (docs/attribution.md):
+    specloop trailers [--rules ID,... | --none REASON] [--model M] [--human]
+                                     print the Spec-Rev / Spec-Rules / Harness
+                                     trailers for the commit you're about to make
+    specloop check --trailers RANGE  also fail on code commits in RANGE without them
+    specloop blame FILE:LINE | --test NAME | --rule ID | --commit REV [--json]
+                                     trace code back to its rules, spec and harness
+    specloop signal add --source S --summary TEXT [--locus FILE:LINE] [--rule ID]
+                        [--evidence FILE|-] [--fingerprint F]
+    specloop signal triage ID --layer L --kind K --confidence C --reasoning TEXT [--confirm]
+    specloop signal confirm|show ID  /  signal resolve ID --status S [--fix TEXT]
+    specloop signals [--all] [--rule ID] [--by layer|harness]
+                                     open signals, or counts of confirmed ones
+
 Configuration lives in specloop.json at the project root (found by walking up
 from the current directory). Python 3.8+, standard library only.
 
@@ -29,6 +43,8 @@ README.md at its top as the overview that links to the feature docs.
 """
 
 import argparse
+import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -68,6 +84,18 @@ DEFAULTS = {
         "harness": "claude",
     },
     "check": {"allowReused": []},
+    # One JSON file per signal (a crash, a QA report, a review comment).
+    "signals": "docs/signals",
+    "trailers": {
+        # Commits that only touch these (globs, matched against the path and
+        # its file name) need no Spec-Rules, nor do the spec, ledger and signals.
+        "exempt": ["*.md", "LICENSE", ".gitignore"],
+        # true: the commit-msg hook refuses code commits without Spec-Rules.
+        "hook": False,
+    },
+    # Confirmed signals of one layer and kind under one Harness-Rev before
+    # `specloop signals --by harness` says it's time to change the harness.
+    "feedback": {"harnessThreshold": 3},
 }
 
 HARNESSES = ("claude", "cursor")
@@ -79,6 +107,34 @@ EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # probably never started.
 START_TIMEOUT_MINUTES = 10
 SYNC_STATUSES = ["starting", "running", "done", "blocked", "failed"]
+
+TRAILER_KEYS = ("Spec-Rev", "Spec-Rules", "Harness", "Harness-Rev", "Sync")
+# Anywhere in a message, not only its last paragraph: a squash merge joins its
+# commits' messages, which leaves their trailers mid-body.
+TRAILER = re.compile(r"^(%s):[ \t]*(.*?)\s*$" % "|".join(TRAILER_KEYS), re.MULTILINE)
+# `Spec-Rules: none (format)`: commits that move lines without changing what
+# they do. Blame looks past them to the commit that wrote the line.
+PASS_THROUGH = {"format", "rename", "move"}
+# What `Harness:` calls each agent the hook can start.
+AGENT_NAMES = {"claude": "claude-code", "cursor": "cursor"}
+# The files that tell an agent how to build, by the name Harness-Rev gives them.
+HARNESS_FILES = (
+    ("spec-sync", ".claude/skills/spec-sync/SKILL.md"),
+    ("claude-md", "CLAUDE.md"),
+    ("agents-md", "AGENTS.md"),
+)
+# The triage taxonomy: the layer a signal is blamed on, and its kinds.
+LAYERS = {
+    "spec": ["wrong", "ambiguous", "missing-rule"],
+    "implementation": ["misread", "regression"],
+    "verification": ["weak-test", "untested"],
+    "harness": ["skill", "context", "model"],
+    "outside": ["env", "ops", "dependency"],
+}
+# Layers a change to the skill or instructions can fix.
+HARNESS_FIXABLE = ("implementation", "verification", "harness")
+CONFIDENCE = ("low", "medium", "high")
+SIGNAL_STATUSES = ("open", "fixed", "wontfix", "duplicate")
 
 # Each style is a regex whose `ids` group holds the text that names spec IDs.
 # A test only claims the IDs written before the first colon of its name, so a
@@ -282,6 +338,16 @@ def rule_texts(docs, config):
     return {i: "\n".join(lines) for i, lines in texts.items()}
 
 
+def rule_version(text):
+    """A rule's version: a short hash of its text. Rewording a rule changes it;
+    moving the rule to another doc doesn't."""
+    return hashlib.sha1(text.encode()).hexdigest()[:6]
+
+
+def rule_versions(docs, config):
+    return {i: rule_version(t) for i, t in rule_texts(docs, config).items()}
+
+
 def is_shallow(root):
     return git(root, "rev-parse", "--is-shallow-repository", check=False).strip() == "true"
 
@@ -334,10 +400,10 @@ def owning_ids(text, config):
     return owner
 
 
-def changed_ids(root, config, base):
-    """IDs whose rule text changed between `base` and HEAD, in spec order.
+def changed_ids(root, config, base, head="HEAD"):
+    """IDs whose rule text changed between `base` and `head`, in spec order.
     A doc that moved counts as removed and added, so its IDs all show."""
-    old_docs, new_docs = dict(spec_docs(root, config, base)), dict(spec_docs(root, config, "HEAD"))
+    old_docs, new_docs = dict(spec_docs(root, config, base)), dict(spec_docs(root, config, head))
     id_re = re.compile(config["idPattern"])
     found = []
 
@@ -349,7 +415,7 @@ def changed_ids(root, config, base):
         old_owner = owning_ids(old_docs.get(path, ""), config)
         new_owner = owning_ids(new_docs.get(path, ""), config)
         old_line = new_line = 0
-        for line in git(root, "diff", "-U0", "--no-renames", base, "HEAD", "--", path).splitlines():
+        for line in git(root, "diff", "-U0", "--no-renames", base, head, "--", path).splitlines():
             if hunk := re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line):
                 old_line, new_line = int(hunk.group(1)), int(hunk.group(2))
             elif line.startswith("+") and not line.startswith("+++"):
@@ -599,6 +665,323 @@ def reused_ids(root, config, current_docs):
     return [(spec_id, removed, back) for spec_id, (removed, back) in reused.items() if spec_id in present]
 
 
+# MARK: attribution
+#
+# Commits say where they came from in trailers (Spec-Rev, Spec-Rules, Harness,
+# Harness-Rev, Sync). Blame follows a line or a test back to them.
+
+
+def parse_trailers(message):
+    """{key: [values]} for every known trailer anywhere in `message`."""
+    found = defaultdict(list)
+    for key, value in TRAILER.findall(message):
+        if value:
+            found[key].append(value)
+    return found
+
+
+def parse_rules(values, config):
+    """(rules as (id, version or None), reasons given for `none`, items that
+    aren't rule IDs) from Spec-Rules values."""
+    item = re.compile(r"^(%s)(?:@([0-9a-f]+))?$" % config["idPattern"])
+    rules, reasons, bad = [], [], []
+    for value in values:
+        if none := re.match(r"^none\b\s*(?:\((.*)\))?", value, re.I):
+            reasons.append((none.group(1) or "").strip())
+            continue
+        for part in filter(None, (p.strip() for p in value.split(","))):
+            if match := item.match(part):
+                if (match.group(1), match.group(2)) not in rules:
+                    rules.append((match.group(1), match.group(2)))
+            else:
+                bad.append(part)
+    return rules, reasons, bad
+
+
+def commit_info(root, config, rev):
+    """A commit and what its trailers say about it."""
+    full, abbrev, date, subject, body = git(root, "show", "-s", "--format=%H%x00%h%x00%as%x00%s%x00%B", rev).split("\x00", 4)
+    found = parse_trailers(body)
+    rules, reasons, bad = parse_rules(found.get("Spec-Rules", []), config)
+    first = lambda key: found[key][0] if found.get(key) else ""
+    return {
+        "sha": full, "short": abbrev, "date": date, "subject": subject,
+        "has_rules": bool(found.get("Spec-Rules")), "rules": rules, "none": reasons, "bad": bad,
+        "spec_rev": first("Spec-Rev"), "harness": first("Harness"),
+        "harness_rev": " ".join(found.get("Harness-Rev", [])), "sync": first("Sync"),
+    }
+
+
+def passes_through(info):
+    """A commit that only reformats, renames or moves code."""
+    return bool(info["none"]) and not info["rules"] and all(r.split(" ")[0].lower() in PASS_THROUGH for r in info["none"])
+
+
+def blame_line(root, config, path, line, rev="HEAD"):
+    """(commit info, commits looked past) for the last commit that changed
+    `path`:`line`, skipping commits that only reformat, rename or move code.
+    (None, []) when the line doesn't exist."""
+    skipped = []
+    while True:
+        out = git(root, "blame", "-w", "-M", "-C", "--porcelain", "-L", f"{line},{line}", rev, "--", path, check=False)
+        if not out:
+            return (skipped.pop() if skipped else None), skipped
+        lines = out.splitlines()
+        sha, origin = lines[0].split()[0], int(lines[0].split()[1])
+        origin_path = next((l[len("filename "):] for l in lines if l.startswith("filename ")), path)
+        info = commit_info(root, config, sha)
+        has_parent = bool(git(root, "rev-parse", "-q", "--verify", f"{sha}^", check=False).strip())
+        if not passes_through(info) or not has_parent:
+            return info, skipped
+        skipped.append(info)
+        rev, path, line = f"{sha}^", origin_path, origin
+
+
+def commits_naming(root, config, spec_id):
+    """Commits whose Spec-Rules name `spec_id`, newest first."""
+    found = []
+    for entry in git(root, "log", "--format=%H%x00%B%x01", "HEAD").split("\x01"):
+        sha, _, body = entry.lstrip("\n").partition("\x00")
+        if sha and spec_id in {i for i, _ in parse_rules(parse_trailers(body).get("Spec-Rules", []), config)[0]}:
+            found.append(sha)
+    return found
+
+
+def resolve_locus(root, path):
+    """`path` as a tracked file relative to the root, from a stack frame that may
+    give it absolute or with a build prefix. None if no single file matches."""
+    if (root / path).is_file():
+        return Path(path).as_posix()
+    absolute = Path(path)
+    if absolute.is_absolute():
+        try:
+            return absolute.resolve().relative_to(root.resolve()).as_posix()
+        except ValueError:
+            pass
+    # A build machine's checkout prefix: drop leading parts until one file matches.
+    tracked = git(root, "ls-files").splitlines()
+    parts = [p for p in Path(path).parts if p not in ("/", ".", "..")]
+    for start in range(len(parts)):
+        tail = "/".join(parts[start:])
+        matches = [t for t in tracked if t == tail or t.endswith("/" + tail)]
+        if matches:
+            return matches[0] if len(matches) == 1 else None
+    return None
+
+
+LOCUS = re.compile(r"((?:/|\.{0,2}/)?[\w@+.-]+(?:/[\w@+.-]+)*\.[A-Za-z0-9]+):(\d+)")
+
+
+def loci_in(root, text):
+    """`file:line` places in evidence that name a file in this repo."""
+    found = []
+    for path, line in LOCUS.findall(text):
+        resolved = resolve_locus(root, path)
+        if resolved and f"{resolved}:{line}" not in found:
+            found.append(f"{resolved}:{line}")
+    return found
+
+
+def split_locus(locus):
+    path, _, line = locus.rpartition(":")
+    if not path or not line.isdigit():
+        sys.exit(f"specloop: {locus!r} isn't FILE:LINE")
+    return path, int(line)
+
+
+def trace(root, config, locus=None, test=None, rule=None, commit=None):
+    """What a place in the code traces back to: {commits, skipped, rules, tests,
+    note}. Rules are (id, version the code was built from, or None)."""
+    claims = test_claims(root, config)
+    out = {"commits": [], "skipped": [], "rules": [], "tests": [], "note": ""}
+
+    def add_rules(pairs):
+        for pair in pairs:
+            if pair not in out["rules"]:
+                out["rules"].append(pair)
+
+    if locus:
+        path, line = split_locus(locus)
+        resolved = resolve_locus(root, path)
+        info, skipped = blame_line(root, config, resolved, line) if resolved else (None, [])
+        if not info:
+            out["note"] = f"{locus} isn't a line of a committed file"
+            return out
+        out["commits"], out["skipped"] = [info], skipped
+        add_rules(info["rules"])
+    elif test:
+        places = sorted({where for found in claims.values() for where in found if test in where[2]})
+        if not places:
+            out["note"] = f"no tagged test matches {test!r}"
+            return out
+        out["tests"] = [list(where) for where in places]
+        add_rules([(i, None) for i, found in claims.items() for where in found if where in places])
+        for path, number, _ in places:
+            info, skipped = blame_line(root, config, path, number)
+            if info and info["sha"] not in {c["sha"] for c in out["commits"]}:
+                out["commits"].append(info)
+                out["skipped"] += skipped
+        return out
+    elif rule:
+        out["commits"] = [commit_info(root, config, sha) for sha in commits_naming(root, config, rule)]
+        add_rules([(rule, None)])
+        if not out["commits"]:
+            out["note"] = f"no commit's Spec-Rules names {rule}"
+    else:
+        info = commit_info(root, config, commit)
+        out["commits"] = [info]
+        add_rules(info["rules"])
+    ids = {i for i, _ in out["rules"]}
+    out["tests"] = [list(where) for i in sorted(ids) for where in claims.get(i, [])]
+    return out
+
+
+def harness_revs(root):
+    """Harness-Rev: a short content hash of each instruction file present."""
+    return " ".join(
+        f"{name}@{git(root, 'hash-object', path).strip()[:6]}" for name, path in HARNESS_FILES if (root / path).is_file()
+    )
+
+
+def needs_trailers(config, files):
+    """Whether a commit touching `files` changes code, so must name its rules."""
+    own = [spec_dir(config) + "/" if is_tree(config) else config["spec"], config["ledger"], config["signals"].rstrip("/") + "/"]
+    exempt = config["trailers"]["exempt"]
+    for path in filter(None, files):
+        if any(path == o or (o.endswith("/") and path.startswith(o)) for o in own):
+            continue
+        if any(fnmatch.fnmatch(path, g) or fnmatch.fnmatch(os.path.basename(path), g) for g in exempt):
+            continue
+        return True
+    return False
+
+
+def message_findings(info, defined, where):
+    """(level, message) for what's wrong with one commit's Spec-Rules."""
+    if not info["has_rules"]:
+        return [(
+            "error",
+            f"{where} changes code without a Spec-Rules trailer. Name the rules it implements "
+            f"(`tools/specloop trailers` prints them), or say `Spec-Rules: none (reason)`.",
+        )]
+    found = []
+    if any(not reason for reason in info["none"]):
+        found.append(("error", f"{where} says `Spec-Rules: none` without a reason in brackets, e.g. `none (deps)`."))
+    for item in info["bad"]:
+        found.append(("error", f"{where} has {item!r} in Spec-Rules, which isn't a rule ID."))
+    for spec_id, _ in info["rules"]:
+        if spec_id not in defined:
+            found.append(("error", f"{where} names {spec_id} in Spec-Rules, which the spec there doesn't define."))
+    return found
+
+
+def trailer_findings(root, config, span):
+    """(level, message, path, line) for each code commit in `span` whose
+    trailers are missing or wrong."""
+    findings = []
+    for sha in git(root, "rev-list", "--no-merges", "--reverse", span).split():
+        files = git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha).split("\n")
+        if not needs_trailers(config, files):
+            continue
+        info = commit_info(root, config, sha)
+        defined = {i for _, text in spec_docs(root, config, sha) for i, _, _ in definitions(text, config)}
+        for level, message in message_findings(info, defined, f"{info['short']} ({info['subject'][:60]})"):
+            findings.append((level, message, None, None))
+    return findings
+
+
+# MARK: signals
+#
+# One JSON file per signal under `signals` (default docs/signals/), in the
+# repo, so everyone sees them and their resolution is reviewed like code.
+
+
+def signals_dir(root, config):
+    return root / config["signals"]
+
+
+def load_signals(root, config):
+    directory = signals_dir(root, config)
+    found = []
+    for path in sorted(directory.glob("*.json")) if directory.exists() else []:
+        try:
+            found.append(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            print(f"warning: couldn't read {path.relative_to(root)}", file=sys.stderr)
+    return found
+
+
+def save_signal(root, config, record):
+    directory = signals_dir(root, config)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{record['id']}.json"
+    path.write_text(json.dumps(record, indent=2) + "\n")
+    return path.relative_to(root)
+
+
+def find_signal(root, config, wanted):
+    matches = [s for s in load_signals(root, config) if s["id"] == wanted] or [
+        s for s in load_signals(root, config) if s["id"].startswith(wanted)
+    ]
+    if len(matches) != 1:
+        sys.exit(f"specloop: {'no' if not matches else 'more than one'} signal matches {wanted!r}")
+    return matches[0]
+
+
+def attribute(root, config, loci, rule_ids):
+    """A signal's attribution, from blame of each place and the rules named."""
+    versions = rule_versions(spec_docs(root, config), config)
+    found = {"rules": [], "commits": [], "harness": "", "harness_rev": "", "traced_by": "none"}
+
+    def take(info):
+        if info["sha"][:12] not in found["commits"]:
+            found["commits"].append(info["sha"][:12])
+        for spec_id, version in info["rules"]:
+            label = f"{spec_id}@{version}" if version else spec_id
+            if label not in found["rules"]:
+                found["rules"].append(label)
+        if info["harness"] and not found["harness"]:
+            found["harness"], found["harness_rev"] = info["harness"], info["harness_rev"]
+
+    for locus in loci:
+        for info in trace(root, config, locus=locus)["commits"]:
+            take(info)
+    for spec_id in rule_ids:
+        if not any(r.split("@")[0] == spec_id for r in found["rules"]):
+            found["rules"].append(f"{spec_id}@{versions[spec_id]}" if spec_id in versions else spec_id)
+        if latest := commits_naming(root, config, spec_id)[:1]:
+            take(commit_info(root, config, latest[0]))
+    if found["commits"]:
+        found["traced_by"] = "specloop blame"
+    return found
+
+
+def signal_line(record):
+    triage = record.get("triage") or {}
+    if triage:
+        label = f"{triage['layer']}/{triage['kind']}" + (" ✓" if triage.get("confirmed_by") else " ?")
+    else:
+        label = "untriaged"
+    extra = f"  (+{len(record['duplicates'])})" if record.get("duplicates") else ""
+    status = "" if record["resolution"]["status"] == "open" else f" [{record['resolution']['status']}]"
+    return f"  {record['id']}  {record['source']:<9} {label:<28} {record['summary'][:70]}{extra}{status}"
+
+
+def confirmed(record):
+    return bool((record.get("triage") or {}).get("confirmed_by"))
+
+
+def sync_counts(root, config):
+    """{(harness, harness_rev): number of syncs} from commit trailers."""
+    syncs = defaultdict(set)
+    for entry in git(root, "log", "--format=%H%x00%B%x01", "HEAD").split("\x01"):
+        _, _, body = entry.lstrip("\n").partition("\x00")
+        found = parse_trailers(body)
+        if found.get("Sync"):
+            syncs[(found["Harness"][0] if found.get("Harness") else "", " ".join(found.get("Harness-Rev", [])))].add(found["Sync"][0])
+    return {key: len(revs) for key, revs in syncs.items()}
+
+
 # MARK: worktrees
 #
 # With Claude Code, the hook starts each sync with `claude --bg --worktree
@@ -842,6 +1225,9 @@ def cmd_sync(root, config, args):
         return 0
     if args.status == "running":
         record["branch"] = branch
+        # Where the sync started from, so `trailers` can name the rules it
+        # built after `mark` has moved the ledger.
+        record.setdefault("base", baseline(root, config))
         # The hook recorded the revision it launched from. If the session
         # started from a later one, that launch record is now this sync.
         for other, old in syncs.items():
@@ -902,6 +1288,241 @@ def cmd_cleanup(root, config, args):
         removed, message = remove_sync_worktree(root, config, tree, record, rev, why, args.dry_run)
         if removed or not args.quiet or message.startswith("couldn't"):
             print(f"specloop: {message}")
+    return 0
+
+
+def cmd_trailers(root, config, args):
+    if args.verify:
+        return verify_message(root, config, args.verify)
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    record = next(
+        (r for r in load_syncs(root).values() if r.get("branch") == branch and r.get("status") in ("running", "done")), None
+    )
+    docs = spec_docs(root, config)
+    versions = rule_versions(docs, config)
+    spec_rev = (record or {}).get("rev") or ""
+    if args.none:
+        rules = f"none ({args.none})"
+    else:
+        if args.rules:
+            ids = [i.strip() for i in args.rules.split(",") if i.strip()]
+            unknown = [i for i in ids if i not in versions]
+            if unknown:
+                sys.exit(f"specloop: the spec doesn't define {', '.join(unknown)}")
+        elif record:
+            ids = changed_ids(root, config, record.get("base") or baseline(root, config), record["rev"])
+        else:
+            base, diff = pending_diff(root, config)
+            ids = changed_ids(root, config, base) if diff.strip() else []
+            spec_rev = git(root, "rev-parse", "HEAD").strip() if diff.strip() else ""
+            if not ids:
+                sys.exit(
+                    "specloop: no sync on this branch and no pending rules to name. Say which rules this commit "
+                    "implements with --rules ID,..., or why none apply with --none REASON (e.g. deps, format)."
+                )
+        rules = ", ".join(f"{i}@{versions[i]}" if i in versions else i for i in ids)
+    spec_rev = spec_rev or ledger_rev(root, config) or baseline(root, config) or ""
+    lines = [f"Spec-Rev: {spec_rev[:12]}"] if spec_rev else []
+    lines.append(f"Spec-Rules: {rules}")
+    if args.human:
+        lines.append("Harness: human")
+    else:
+        agent = AGENT_NAMES[(record or {}).get("harness") or harness(root, config)]
+        lines.append(f"Harness: {agent} {args.model}" if args.model else f"Harness: {agent}")
+        if revs := harness_revs(root):
+            lines.append(f"Harness-Rev: {revs}")
+    if record:
+        lines.append(f"Sync: {short(root, record['rev'])}")
+    print("\n".join(lines))
+    return 0
+
+
+def verify_message(root, config, path):
+    """The commit-msg hook: refuse a code commit whose message names no rules."""
+    if not config["trailers"]["hook"]:
+        return 0
+    git_dir = Path(git(root, "rev-parse", "--git-dir").strip())
+    if (git_dir if git_dir.is_absolute() else root / git_dir).joinpath("MERGE_HEAD").exists():
+        return 0  # a merge brings in commits that were checked on their own
+    # The index being committed: a hook's GIT_INDEX_FILE, which GIT_ENV drops.
+    staged = subprocess.run(["git", "diff", "--cached", "--name-only"], capture_output=True, text=True).stdout.split("\n")
+    if not needs_trailers(config, staged):
+        return 0
+    message = "\n".join(l for l in Path(path).read_text().splitlines() if not l.startswith("#"))
+    found = parse_trailers(message)
+    rules, reasons, bad = parse_rules(found.get("Spec-Rules", []), config)
+    info = {"has_rules": bool(found.get("Spec-Rules")), "rules": rules, "none": reasons, "bad": bad}
+    defined = {i for _, text in spec_docs(root, config) for i, _, _ in definitions(text, config)}
+    problems = message_findings(info, defined, "This commit")
+    for _, text in problems:
+        print(f"specloop: {text}", file=sys.stderr)
+    if problems:
+        print("specloop: to commit anyway, use git commit --no-verify.", file=sys.stderr)
+    return 1 if problems else 0
+
+
+def describe_rule(spec_id, version, versions):
+    current = versions.get(spec_id)
+    if current is None:
+        return f"{spec_id}@{version} (no longer in the spec)" if version else f"{spec_id} (no longer in the spec)"
+    if not version:
+        return f"{spec_id} (current: {current})"
+    return f"{spec_id}@{version} (current: {current}, {'unchanged' if version == current else 'changed since'})"
+
+
+def cmd_blame(root, config, args):
+    chosen = [x for x in (args.locus, args.test, args.rule, args.commit) if x]
+    if len(chosen) != 1:
+        sys.exit("specloop: give one of FILE:LINE, --test NAME, --rule ID or --commit REV")
+    found = trace(root, config, locus=args.locus, test=args.test, rule=args.rule, commit=args.commit)
+    if args.json:
+        print(json.dumps(found, indent=2))
+        return 0 if found["commits"] or found["tests"] else 1
+    versions = rule_versions(spec_docs(root, config), config)
+    print(args.locus or (f"test {args.test!r}" if args.test else args.rule or args.commit))
+    if found["note"]:
+        print(f"  {found['note']}")
+    for info in found["commits"]:
+        print(f"  {info['short']}  {info['date']}  {info['subject']}")
+        if not info["has_rules"]:
+            print("    spec     no trailers: this commit doesn't say which rules it implements")
+        elif info["none"] and not info["rules"]:
+            print(f"    spec     none ({', '.join(info['none'])})")
+        else:
+            rules = ", ".join(describe_rule(i, v, versions) for i, v in info["rules"])
+            print(f"    spec     {info['spec_rev'][:7] or '?':<8} {rules}")
+        if info["harness"]:
+            print(f"    harness  {info['harness']}" + (f"  {info['harness_rev']}" if info["harness_rev"] else ""))
+        if info["sync"]:
+            print(f"    sync     {info['sync']}")
+    if args.test and found["rules"]:
+        print(f"  rules    {', '.join(describe_rule(i, v, versions) for i, v in found['rules'])}")
+    for path, number, text in found["tests"]:
+        print(f"  test     {path}:{number}  {text}")
+    for info in found["skipped"]:
+        print(f"  (looked past {info['short']}, {', '.join(info['none'])}: {info['subject'][:60]})")
+    return 0 if found["commits"] or found["tests"] else 1
+
+
+def cmd_signal(root, config, args):
+    if args.action == "add":
+        evidence = []
+        if args.evidence:
+            text = sys.stdin.read() if args.evidence == "-" else Path(args.evidence).read_text()
+            evidence = [l.rstrip() for l in text.splitlines() if l.strip()][:200]
+        loci = list(dict.fromkeys(
+            [f"{resolve_locus(root, p) or p}:{n}" for p, n in map(split_locus, args.locus or [])] + loci_in(root, "\n".join(evidence))[:5]
+        ))
+        rules = args.rule or []
+        fingerprint = args.fingerprint or f"{args.source}:{(loci or rules or [args.summary.lower()])[0]}"
+        for record in load_signals(root, config):
+            if record["fingerprint"] == fingerprint and record["resolution"]["status"] == "open":
+                record.setdefault("duplicates", []).append({"received": stamp(), "summary": args.summary, "evidence": evidence[:20]})
+                save_signal(root, config, record)
+                print(f"specloop: same as open signal {record['id']} ({len(record['duplicates'])} repeats); added to it")
+                return 0
+        received = stamp()
+        digest = hashlib.sha1(f"{fingerprint}\0{received}\0{time.time_ns()}".encode()).hexdigest()[:6]
+        record = {
+            "id": f"sig-{now():%Y%m%d}-{digest}",
+            "fingerprint": fingerprint,
+            "source": args.source,
+            "received": received,
+            "summary": args.summary,
+            "evidence": evidence,
+            "locus": loci,
+            "attribution": attribute(root, config, loci, rules),
+            "triage": None,
+            "resolution": {"status": "open", "fix": None},
+            "duplicates": [],
+        }
+        path = save_signal(root, config, record)
+        found = record["attribution"]
+        print(f"specloop: recorded {record['id']} in {path}")
+        print(f"  rules    {', '.join(found['rules']) or 'none traced'}")
+        print(f"  commits  {', '.join(c[:7] for c in found['commits']) or 'none traced'}")
+        if found["harness"]:
+            print(f"  harness  {found['harness']}" + (f"  {found['harness_rev']}" if found["harness_rev"] else ""))
+        return 0
+
+    record = find_signal(root, config, args.id)
+    if args.action == "show":
+        print(json.dumps(record, indent=2))
+        return 0
+    if args.action == "triage":
+        if args.kind not in LAYERS[args.layer]:
+            sys.exit(f"specloop: a {args.layer} signal's kind is one of {', '.join(LAYERS[args.layer])}")
+        record["triage"] = {
+            "layer": args.layer, "kind": args.kind, "confidence": args.confidence, "reasoning": args.reasoning,
+            "confirmed_by": my_address(root) if args.confirm else None,
+        }
+        word = "confirmed" if args.confirm else "proposed; confirm with `specloop signal confirm`"
+    elif args.action == "confirm":
+        if not record.get("triage"):
+            sys.exit(f"specloop: {record['id']} has no triage to confirm yet")
+        record["triage"]["confirmed_by"] = my_address(root)
+        word = "confirmed"
+    else:  # resolve
+        record["resolution"] = {"status": args.status, "fix": args.fix or record["resolution"].get("fix")}
+        word = args.status
+    save_signal(root, config, record)
+    print(f"specloop: {record['id']} {word}")
+    return 0
+
+
+def my_address(root):
+    return git(root, "config", "--get", "user.email", check=False).strip() or "unknown"
+
+
+def cmd_signals(root, config, args):
+    records = sorted(load_signals(root, config), key=lambda r: r["received"], reverse=True)
+    if args.rule:
+        records = [r for r in records if any(x.split("@")[0] == args.rule for x in r["attribution"]["rules"])]
+    if not args.by:
+        shown = records if args.all or args.rule else [r for r in records if r["resolution"]["status"] == "open"]
+        if not shown:
+            print("No open signals." if not args.all else "No signals.")
+        for record in shown:
+            print(signal_line(record))
+        return 0
+    counted = [r for r in records if confirmed(r)]
+    unconfirmed = len(records) - len(counted)
+    if args.by == "layer":
+        counts = defaultdict(int)
+        for record in counted:
+            counts[(record["triage"]["layer"], record["triage"]["kind"])] += 1
+        for layer, kinds in LAYERS.items():
+            total = sum(counts[(layer, k)] for k in kinds)
+            if total:
+                print(f"{layer:<15} {total:>3}   " + ", ".join(f"{k} {counts[(layer, k)]}" for k in kinds if counts[(layer, k)]))
+        if not counted:
+            print("No confirmed signals yet.")
+    else:
+        syncs = sync_counts(root, config)
+        groups = defaultdict(list)
+        for record in counted:
+            if record["triage"]["layer"] != "outside":
+                groups[(record["attribution"]["harness"], record["attribution"]["harness_rev"])].append(record)
+        keys = sorted(set(syncs) | set(groups), key=lambda k: (k[0], k[1]))
+        print(f"{'harness':<30} {'harness rev':<36} {'syncs':>5} {'signals':>7} {'per sync':>8}")
+        for key in keys:
+            n, found = syncs.get(key, 0), len(groups.get(key, []))
+            rate = f"{found / n:.2f}" if n else "-"
+            print(f"{key[0] or '(none)':<30} {key[1] or '-':<36} {n:>5} {found:>7} {rate:>8}")
+        threshold = config["feedback"]["harnessThreshold"]
+        for key, found in groups.items():
+            patterns = defaultdict(list)
+            for record in found:
+                if record["triage"]["layer"] in HARNESS_FIXABLE:
+                    patterns[(record["triage"]["layer"], record["triage"]["kind"])].append(record["id"])
+            for (layer, kind), ids in patterns.items():
+                if len(ids) >= threshold:
+                    print(
+                        f"\npattern: {len(ids)} confirmed {layer}/{kind} signals under {key[1] or key[0] or 'no harness'}: "
+                        f"{', '.join(ids)}. Propose a skill or instruction change that cites them."
+                    )
+    if unconfirmed:
+        print(f"\n({unconfirmed} signal{'s' * (unconfirmed != 1)} without confirmed triage aren't counted)")
     return 0
 
 
@@ -968,6 +1589,8 @@ def cmd_check(root, config, args):
                 + " and the code hasn't caught up. Run /spec-sync, or merge its spec-sync branch.",
                 spec_root(config),
             )
+    if args.trailers:
+        findings += trailer_findings(root, config, args.trailers)
     return report(findings, args)
 
 
@@ -1020,6 +1643,7 @@ def main():
     p.add_argument("--format", choices=["text", "github"], default="text", help="github: workflow annotations")
     p.add_argument("--allow-pending", action="store_true", help="a spec ahead of the code is a warning, not an error")
     p.add_argument("--require", help="comma-separated ID prefixes that must be fully covered (default: sync.require)")
+    p.add_argument("--trailers", metavar="RANGE", help="also check the trailers of code commits in RANGE (e.g. origin/main..HEAD)")
     p = sub.add_parser("mark")
     p.add_argument("rev", nargs="?", default="HEAD")
     p = sub.add_parser("sync")
@@ -1036,6 +1660,44 @@ def main():
     p = sub.add_parser("trigger")
     p.add_argument("--since", help="revision before this update (default: HEAD's first parent)")
     sub.add_parser("harness")
+    p = sub.add_parser("trailers")
+    p.add_argument("--rules", help="comma-separated rule IDs (default: the sync on this branch, or what's pending)")
+    p.add_argument("--none", metavar="REASON", help="no rule covers this commit, e.g. deps, format, rename")
+    p.add_argument("--model", help="the model building the change, for Harness")
+    p.add_argument("--human", action="store_true", help="written by hand: Harness: human")
+    p.add_argument("--verify", metavar="MSGFILE", help=argparse.SUPPRESS)  # the commit-msg hook
+    p = sub.add_parser("blame")
+    p.add_argument("locus", nargs="?", help="FILE:LINE, e.g. from a stack frame")
+    p.add_argument("--test", help="a tagged test, by part of its line")
+    p.add_argument("--rule", help="every commit that names this rule")
+    p.add_argument("--commit", help="one commit's trailers")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("signal")
+    actions = p.add_subparsers(dest="action", required=True)
+    a = actions.add_parser("add")
+    a.add_argument("--source", required=True, help="test, crash, qa, review, user, telemetry, ...")
+    a.add_argument("--summary", required=True)
+    a.add_argument("--locus", action="append", help="FILE:LINE (repeatable); also read from the evidence")
+    a.add_argument("--rule", action="append", help="a rule it's about (repeatable)")
+    a.add_argument("--evidence", help="a file with the stack trace, report or comment, or - for stdin")
+    a.add_argument("--fingerprint", help="what makes two signals the same (default: source and first locus)")
+    a = actions.add_parser("triage")
+    a.add_argument("id")
+    a.add_argument("--layer", required=True, choices=list(LAYERS))
+    a.add_argument("--kind", required=True)
+    a.add_argument("--confidence", required=True, choices=CONFIDENCE)
+    a.add_argument("--reasoning", required=True)
+    a.add_argument("--confirm", action="store_true", help="you agree with it (records your user.email)")
+    for name in ("confirm", "show"):
+        actions.add_parser(name).add_argument("id")
+    a = actions.add_parser("resolve")
+    a.add_argument("id")
+    a.add_argument("--status", required=True, choices=SIGNAL_STATUSES, help="open reopens it")
+    a.add_argument("--fix", help="what fixed it: a PR, a commit, a lesson")
+    p = sub.add_parser("signals")
+    p.add_argument("--all", action="store_true", help="resolved ones too")
+    p.add_argument("--rule", help="only signals traced to this rule")
+    p.add_argument("--by", choices=["layer", "harness"], help="counts of confirmed signals")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")
     args = parser.parse_args()
@@ -1052,6 +1714,10 @@ def main():
         "trigger": cmd_trigger,
         "cleanup": cmd_cleanup,
         "harness": cmd_harness,
+        "trailers": cmd_trailers,
+        "blame": cmd_blame,
+        "signal": cmd_signal,
+        "signals": cmd_signals,
         "config": cmd_config,
     }[args.command]
     return handler(root, config, args)

@@ -1,6 +1,6 @@
-# Attribution and feedback (design)
+# Attribution and feedback
 
-> Status: proposal. Nothing here is built yet. It's written down so the pieces can be built in order and argued with first.
+> Status: built (October 2026), but not yet tried on a real project. The "Done when" column under [Build order](#build-order) is what still has to happen for each piece to count as proven.
 
 specloop already traces forward: rules have IDs, tests name the IDs they check, and the ledger records which spec revision the code matches. This design adds the trace backward. When something goes wrong with code a sync produced, specloop should be able to say which rules, which revision of them, and which harness the code came from, and then which part of the system to fix.
 
@@ -54,7 +54,7 @@ Sync: 9f8e7d6
 
 - **Code-first commits** (a hotfix, code changed together with the spec) still name their rules: `Spec-Rules: SCAN-8@…` and `Harness: human`. An agent session that isn't a sync names itself: `Harness: claude-code claude-opus-5-5` with no `Sync`.
 - **Commits no rule covers** (dependency bumps, formatting, build config) say so: `Spec-Rules: none (deps)`. The reason in brackets is required, so "none" is a decision rather than an omission.
-- **Enforcement:** `specloop check --trailers <range>` fails on a code commit in the range with no `Spec-Rules`, or one naming an ID the spec at that commit doesn't define. In CI the range is the PR's commits. An optional `commit-msg` hook gives the same answer locally.
+- **Enforcement:** `specloop check --trailers <range>` fails on a code commit in the range with no `Spec-Rules`, or one naming an ID the spec at that commit doesn't define. In CI the range is the PR's commits ([setup](ci.md#github-actions)). The `commit-msg` hook gives the same answer locally when `trailers.hook` is `true` in `specloop.json`. It's off by default, and `git commit --no-verify` skips it once.
 
 ### Squash merges
 
@@ -111,7 +111,8 @@ One record per piece of feedback, one file per record under `docs/signals/` (`si
   "attribution": {
     "rules": ["XP-6@3fa2c1"],
     "commits": ["a1b2c3d"],
-    "harness": "claude-code claude-opus-5-5 spec-sync@41d0aa",
+    "harness": "claude-code claude-opus-5-5",
+    "harness_rev": "spec-sync@41d0aa claude-md@9c2e11",
     "traced_by": "specloop blame"
   },
   "triage": {
@@ -126,6 +127,7 @@ One record per piece of feedback, one file per record under `docs/signals/` (`si
 }
 ```
 
+- **Attribution** comes from blaming each locus, plus each rule given with `--rule` and the latest commit that names it. `harness` and `harness_rev` are the first traced commit's, kept apart so reports can group by them.
 - **IDs** are the date plus a short hash of the fingerprint and time. Sequential numbers would collide when two branches each add a signal, and there's no server to hand them out.
 - **Fingerprints** collapse repeats. A crash's fingerprint is its top in-project frame and error type, a failing test's is the test's name, a review comment's is its file and the rule it cites. A signal with a fingerprint that's already open is added to that record's `duplicates` instead of becoming a new one. How often something recurs is evidence for triage.
 - **Sources** are open-ended strings: `test`, `crash`, `qa`, `review`, `user`, `telemetry`. specloop doesn't pull from any of them. `specloop signal add` takes a file or standard input (a pasted stack trace, a comment), and adapters for crash reporters or issue trackers can call the same command. Nothing specloop ships talks to a network.
@@ -164,6 +166,18 @@ A skill that takes a signal ID, or raw evidence it records as a new signal, and:
 
 A person confirms the classification (`confirmed_by`) before the fix is opened. Unconfirmed triage counts as nothing in reports.
 
+The skill records its steps with:
+
+```
+tools/specloop signal add --source crash --summary "..." --evidence trace.txt [--locus F:L] [--rule ID]
+tools/specloop signal triage <id> --layer spec --kind ambiguous --confidence medium --reasoning "..."
+tools/specloop signal confirm <id>                 # the person agrees; records their user.email
+tools/specloop signal resolve <id> --status fixed --fix "spec PR #14"
+tools/specloop signal show <id>
+```
+
+`triage --confirm` does both at once, for when the person triages a signal themselves.
+
 ## 5. Feedback
 
 Fixes to the spec, the code and the tests go through the normal loop: a spec PR, a sync, a review.
@@ -195,7 +209,7 @@ Signals per sync, split by `Harness-Rev`, is how you see whether a skill change 
 
 Each step is useful if the later ones never ship.
 
-| # | Step | Done when |
+| # | Step (all built) | Done when |
 |---|---|---|
 | 1 | **Trailers.** `specloop trailers`; `/spec-sync` writes them in commits and PR descriptions; `check --trailers` in CI; the template `CLAUDE.md` asks for them on hand-written commits | A week of commits on the iOS project all carry trailers, including after squash merges |
 | 2 | **`specloop blame`** for `file:line`, `--test`, `--rule`, `--commit`, reading trailers from anywhere in a message | A real crash frame and a real failing test both trace to the right rule and sync |
