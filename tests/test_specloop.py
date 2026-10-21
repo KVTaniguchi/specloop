@@ -9,6 +9,7 @@ records how it was called.
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -1063,7 +1064,7 @@ class SignalTests(SpecloopTestCase):
 
         repo.run("signal", "resolve", record["id"], "--status", "fixed", "--fix", "spec PR #4")
         self.assertIn("No open signals.", repo.run("signals").stdout)
-        self.assertIn("[fixed]", repo.run("signals", "--all").stdout)
+        self.assertIn("[fixed spec PR #4]", repo.run("signals", "--all").stdout)
 
     def test_harness_pattern_reaches_the_threshold(self):
         repo = self.repo()
@@ -1076,6 +1077,100 @@ class SignalTests(SpecloopTestCase):
         out = repo.run("signals", "--by", "harness").stdout
         self.assertRegex(out, r"claude-code claude-opus-5-5 +spec-sync@111111 +1 +3 +3\.00")
         self.assertIn("pattern: 3 confirmed implementation/misread signals under spec-sync@111111", out)
+
+
+class FeedbackLoopTests(SpecloopTestCase):
+    def qa_signal(self, repo, rule="XP-1", summary="Scan XP feels low"):
+        out = repo.run("signal", "add", "--source", "qa", "--summary", summary, "--rule", rule).stdout
+        return re.search(r"sig-\d{8}-[0-9a-f]{6}", out).group(0)
+
+    def sync_worktree(self, repo, rev):
+        path, short = repo.add_worktree(rev, "worktree-spec-sync")
+        repo.git("-C", str(path), "branch", "-m", f"spec-sync/{short}")
+        repo.run_in(path, "sync", "running")
+        return path, short
+
+    def test_status_shows_open_signals_and_those_on_pending_rules(self):
+        repo = self.repo()
+        sid = self.qa_signal(repo)
+        self.qa_signal(repo, rule="XP-2", summary="Relabel")
+        self.assertIn("signals:     2 open, 2 untriaged (tools/specloop signals)", repo.run("status").stdout)
+        repo.spec_change()
+        out = repo.run("status").stdout
+        self.assertIn("2 open, 2 untriaged, 1 on pending rules", out)
+        self.assertIn(f"  {sid}  Scan XP feels low", out)
+
+    def test_signals_pending_in_a_sync_worktree(self):
+        repo = self.repo()
+        sid = self.qa_signal(repo)  # not committed: it's only in the main work tree
+        self.qa_signal(repo, rule="XP-2", summary="Relabel")
+        path, _ = self.sync_worktree(repo, repo.spec_change())
+        repo.run_in(path, "mark", "HEAD")
+        out = repo.run_in(path, "signals", "--pending").stdout
+        self.assertIn(sid, out)
+        self.assertNotIn("Relabel", out)
+
+    def test_fixes_signal_trailer_closes_it_when_it_lands(self):
+        repo = self.repo()
+        sid = self.qa_signal(repo)
+        repo.commit("record signal\n\nSpec-Rules: none (signal)\n")
+        self.assertIn(f"Fixes-Signal: {sid}", repo.run("trailers", "--rules", "XP-1", "--human", "--fixes", sid).stdout)
+        self.assertIn("no signal sig-nope", repo.run("trailers", "--rules", "XP-1", "--fixes", "sig-nope").output)
+
+        repo.git("checkout", "-q", "-b", "fix")
+        repo.write("app.py", "XP = 10\n")
+        repo.commit(f"fix scan XP\n\nSpec-Rules: XP-1\nHarness: human\nFixes-Signal: {sid}\n")
+        repo.git("checkout", "-q", "main")
+        self.assertIn(sid, repo.run("signals").stdout, "not fixed until the fix is on HEAD")
+        repo.git("merge", "-q", "fix")
+        self.assertIn("No open signals.", repo.run("signals").stdout)
+        sha = repo.git("rev-parse", "--short", "HEAD").stdout.strip()
+        self.assertIn(f"[fixed {sha}]", repo.run("signals", "--all").stdout)
+        self.assertNotIn("signals:", repo.run("status").stdout)
+
+    def test_spec_fix_waits_for_the_sync(self):
+        repo = self.repo()
+        sid = self.qa_signal(repo)
+        repo.change_spec()
+        repo.commit(f"raise scan XP\n\nFixes-Signal: {sid}\n", SPEC_SYNC="off")
+        self.assertIn("[fix pending sync", repo.run("signals").stdout)
+        self.assertIn("1 fixed in the spec, waiting for the sync", repo.run("status").stdout)
+        repo.run("mark")
+        repo.commit("ledger", SPEC_SYNC="off")
+        self.assertIn("No open signals.", repo.run("signals").stdout)
+
+    def test_repeat_of_a_fixed_signal_is_new(self):
+        repo = self.repo()
+        sid = self.qa_signal(repo)
+        repo.write("app.py", "XP = 10\n")
+        repo.commit(f"fix\n\nSpec-Rules: XP-1\nFixes-Signal: {sid}\n")
+        self.assertNotEqual(self.qa_signal(repo), sid)
+
+    def test_blocked_sync_records_a_signal_in_the_main_work_tree(self):
+        repo = self.repo()
+        path, short = self.sync_worktree(repo, repo.spec_change())
+        question = repo.path.parent / "question.txt"
+        question.write_text("Does the bonus apply to relabels?\n")
+        out = repo.run_in(path, "sync", "blocked", "--note", "Does 12 XP apply to relabels?", "--signal",
+                          "--evidence", str(question), "--model", "claude-opus-5-5").stdout
+        self.assertIn("recorded signal sig-", out)
+        [record] = [json.loads(p.read_text()) for p in (repo.path / "docs" / "signals").glob("*.json")]
+        self.assertFalse((path / "docs" / "signals").exists())
+        self.assertEqual(record["source"], "sync")
+        self.assertEqual(record["summary"], f"Sync of {short} blocked: Does 12 XP apply to relabels?")
+        self.assertEqual(record["attribution"]["rules"], [f"XP-1@{XP1_NEW}"])
+        self.assertEqual(record["attribution"]["harness"], "claude-code claude-opus-5-5")
+        self.assertEqual(record["evidence"], ["Does the bonus apply to relabels?"])
+        self.assertEqual((record["triage"]["layer"], record["triage"]["kind"], record["triage"]["confirmed_by"]),
+                         ("spec", "ambiguous", None))
+
+    def test_failed_sync_signal_has_no_triage_and_needs_a_stop(self):
+        repo = self.repo()
+        path, _ = self.sync_worktree(repo, repo.spec_change())
+        self.assertIn("--signal is for a sync", repo.run_in(path, "sync", "running", "--signal").output)
+        repo.run_in(path, "sync", "failed", "--note", "XP-1 test keeps failing", "--signal")
+        [record] = [json.loads(p.read_text()) for p in (repo.path / "docs" / "signals").glob("*.json")]
+        self.assertIsNone(record["triage"])
 
 
 if __name__ == "__main__":

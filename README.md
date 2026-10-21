@@ -102,10 +102,11 @@ Then:
 | Watch a running sync | `tools/specloop status`; Claude Code: `claude agents`, `claude attach "Spec sync <sha>"`; Cursor: `tail -f .git/specloop/logs/<sha>.log` |
 | Review a sync locally | `cd .claude/worktrees/spec-sync-<sha>` (Claude Code) or `.specloop/worktrees/spec-sync-<sha>` (Cursor); its branch is checked out there |
 | Clean up sync worktrees | Automatic after a merge; `tools/specloop cleanup` ([details](docs/ci.md#cleaning-up-worktrees)) |
-| Gate CI on the spec | `tools/specloop check` ([CI setup](docs/ci.md)) |
+| Gate CI on the spec | `tools/specloop check --trailers <range>` ([CI setup](docs/ci.md)) |
 | Commit code by hand | End the message with `tools/specloop trailers --rules XP-6 --human`, or `--none deps` |
 | Find what built a line | `tools/specloop blame src/xp.swift:42` (also `--test`, `--rule`, `--commit`) |
-| Report a crash, bug or review comment | `/spec-triage` with the evidence; `tools/specloop signals` lists open ones |
+| Report a crash, bug or review comment | `/spec-triage` with the evidence; `tools/specloop status` counts open ones, `signals` lists them |
+| Close a signal | Commit the fix with `Fixes-Signal: <id>` (`trailers --fixes <id>`); it closes once on the default branch |
 | See whether a harness change helped | `tools/specloop signals --by harness` |
 
 ## Docs

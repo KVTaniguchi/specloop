@@ -31,8 +31,11 @@ specloop — keep a spec, the code, and the tests in lockstep.
                         [--evidence FILE|-] [--fingerprint F]
     specloop signal triage ID --layer L --kind K --confidence C --reasoning TEXT [--confirm]
     specloop signal confirm|show ID  /  signal resolve ID --status S [--fix TEXT]
-    specloop signals [--all] [--rule ID] [--by layer|harness]
-                                     open signals, or counts of confirmed ones
+    specloop signals [--all] [--rule ID] [--pending] [--by layer|harness]
+                                     open signals, or counts of confirmed ones.
+                                     A commit with `Fixes-Signal: <id>` closes
+                                     one once it's on HEAD (and, for a spec
+                                     change, once the code is built)
 
 Configuration lives in specloop.json at the project root (found by walking up
 from the current directory). Python 3.8+, standard library only.
@@ -108,7 +111,7 @@ EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 START_TIMEOUT_MINUTES = 10
 SYNC_STATUSES = ["starting", "running", "done", "blocked", "failed"]
 
-TRAILER_KEYS = ("Spec-Rev", "Spec-Rules", "Harness", "Harness-Rev", "Sync")
+TRAILER_KEYS = ("Spec-Rev", "Spec-Rules", "Harness", "Harness-Rev", "Sync", "Fixes-Signal")
 # Anywhere in a message, not only its last paragraph: a squash merge joins its
 # commits' messages, which leaves their trailers mid-body.
 TRAILER = re.compile(r"^(%s):[ \t]*(.*?)\s*$" % "|".join(TRAILER_KEYS), re.MULTILINE)
@@ -900,23 +903,122 @@ def signals_dir(root, config):
     return root / config["signals"]
 
 
+def main_worktree(root):
+    """The clone's main work tree, which a sync's worktree hangs off."""
+    first = git(root, "worktree", "list", "--porcelain").split("\n", 1)[0]
+    return Path(first[len("worktree "):]) if first.startswith("worktree ") else root
+
+
 def load_signals(root, config):
-    directory = signals_dir(root, config)
-    found = []
-    for path in sorted(directory.glob("*.json")) if directory.exists() else []:
-        try:
-            found.append(json.loads(path.read_text()))
-        except (OSError, ValueError):
-            print(f"warning: couldn't read {path.relative_to(root)}", file=sys.stderr)
-    return found
+    """Every signal here, plus any in the main work tree this worktree's branch
+    doesn't have yet (one recorded there, not committed). Each remembers its
+    file in `_path`."""
+    found = {}
+    for base in dict.fromkeys([root, main_worktree(root)]):
+        directory = signals_dir(base, config)
+        for path in sorted(directory.glob("*.json")) if directory.exists() else []:
+            try:
+                record = json.loads(path.read_text())
+            except (OSError, ValueError):
+                print(f"warning: couldn't read {path}", file=sys.stderr)
+                continue
+            record["_path"] = str(path)
+            found.setdefault(record["id"], record)
+    return list(found.values())
 
 
 def save_signal(root, config, record):
-    directory = signals_dir(root, config)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{record['id']}.json"
-    path.write_text(json.dumps(record, indent=2) + "\n")
-    return path.relative_to(root)
+    path = Path(record["_path"]) if record.get("_path") else signals_dir(root, config) / f"{record['id']}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({k: v for k, v in record.items() if not k.startswith("_")}, indent=2) + "\n")
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        return path
+
+
+def fixing_commits(root):
+    """{signal id: sha} for each signal a commit on HEAD names in Fixes-Signal."""
+    found = {}
+    for entry in git(root, "log", "--format=%H%x00%B%x01", "HEAD").split("\x01"):
+        sha, _, body = entry.lstrip("\n").partition("\x00")
+        for value in parse_trailers(body).get("Fixes-Signal", []):
+            for sid in re.split(r"[,\s]+", value):
+                if sid:
+                    found[sid] = sha  # oldest wins: the log is newest first
+    return found
+
+
+def with_status(root, config, records):
+    """Fill in each record's `_status` and `_fix`: what's stored, unless it's
+    open and a commit on HEAD fixes it. A fix that changed the spec counts
+    once the code is built, so it's `fix pending sync` until the ledger has it."""
+    fixes = fixing_commits(root)
+    base = baseline(root, config)
+    base_ok = bool(base) and commit_exists(root, base)
+    for record in records:
+        stored = record["resolution"]
+        record["_status"], record["_fix"] = stored["status"], stored.get("fix")
+        sha = fixes.get(record["id"])
+        if stored["status"] != "open" or not sha:
+            continue
+        changes_spec = bool(git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", sha, "--", spec_pathspec(config)).strip())
+        built = not changes_spec or (base_ok and succeeds(root, "merge-base", "--is-ancestor", sha, base))
+        record["_status"], record["_fix"] = ("fixed" if built else "fix pending sync"), short(root, sha)
+    return records
+
+
+def is_open(record):
+    return record.get("_status", record["resolution"]["status"]) in ("open", "fix pending sync")
+
+
+def sync_rule_ids(root, config):
+    """The rules the sync on this branch builds, else the pending ones."""
+    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+    record = next(
+        (r for r in load_syncs(root).values() if r.get("branch") == branch and r.get("status") in ("running", "done")), None
+    )
+    if record:
+        return record, changed_ids(root, config, record.get("base") or baseline(root, config), record["rev"])
+    base, diff = pending_diff(root, config)
+    return None, (changed_ids(root, config, base) if diff.strip() else [])
+
+
+def on_rules(record, ids):
+    return any(r.split("@")[0] in ids for r in record["attribution"]["rules"])
+
+
+def new_signal(root, config, source, summary, evidence, loci, rules, fingerprint=None, attribution=None):
+    """Record a signal, or add it to the open one with the same fingerprint.
+    Returns (record, path or None, whether it was a repeat)."""
+    fingerprint = fingerprint or f"{source}:{(loci or rules or [summary.lower()])[0]}"
+    for record in with_status(root, config, load_signals(root, config)):
+        if record["fingerprint"] == fingerprint and is_open(record):
+            record.setdefault("duplicates", []).append({"received": stamp(), "summary": summary, "evidence": evidence[:20]})
+            return record, save_signal(root, config, record), True
+    received = stamp()
+    digest = hashlib.sha1(f"{fingerprint}\0{received}\0{time.time_ns()}".encode()).hexdigest()[:6]
+    record = {
+        "id": f"sig-{now():%Y%m%d}-{digest}",
+        "fingerprint": fingerprint,
+        "source": source,
+        "received": received,
+        "summary": summary,
+        "evidence": evidence,
+        "locus": loci,
+        "attribution": attribution or attribute(root, config, loci, rules),
+        "triage": None,
+        "resolution": {"status": "open", "fix": None},
+        "duplicates": [],
+    }
+    return record, save_signal(root, config, record), False
+
+
+def read_evidence(source):
+    if not source:
+        return []
+    text = sys.stdin.read() if source == "-" else Path(source).read_text(errors="replace")
+    return [l.rstrip() for l in text.splitlines() if l.strip()][:200]
 
 
 def find_signal(root, config, wanted):
@@ -963,7 +1065,8 @@ def signal_line(record):
     else:
         label = "untriaged"
     extra = f"  (+{len(record['duplicates'])})" if record.get("duplicates") else ""
-    status = "" if record["resolution"]["status"] == "open" else f" [{record['resolution']['status']}]"
+    state, fix = record.get("_status", record["resolution"]["status"]), record.get("_fix")
+    status = "" if state == "open" else f" [{state}{' ' + fix if fix else ''}]"
     return f"  {record['id']}  {record['source']:<9} {label:<28} {record['summary'][:70]}{extra}{status}"
 
 
@@ -1244,7 +1347,43 @@ def cmd_sync(root, config, args):
             record[field] = getattr(args, key)
     save_sync(root, record)
     print(f"specloop: sync of {record['rev'][:7]} is {args.status}")
+    if args.signal:
+        if args.status not in ("blocked", "failed"):
+            sys.exit("specloop: --signal is for a sync that's blocked or failed")
+        record_sync_signal(root, config, record, args)
     return 0
+
+
+def record_sync_signal(root, config, record, args):
+    """A sync that stopped is a signal about the rules it was building: blocked
+    on a question usually means the spec is ambiguous, failed means the code or
+    the tests wouldn't come right. Written to the main work tree, because a
+    stopped sync's worktree is cleaned up."""
+    ids = changed_ids(root, config, record.get("base") or baseline(root, config), record["rev"])
+    versions = rule_versions(spec_docs(root, config), config)
+    agent = AGENT_NAMES[record.get("harness") or harness(root, config)]
+    attribution = {
+        "rules": [f"{i}@{versions[i]}" if i in versions else i for i in ids],
+        "commits": [],
+        "harness": f"{agent} {args.model}" if args.model else agent,
+        "harness_rev": harness_revs(root),
+        "traced_by": f"sync {short(root, record['rev'])}",
+    }
+    summary = f"Sync of {short(root, record['rev'])} {args.status}: {args.note or 'no reason given'}"
+    target = main_worktree(root)
+    signal, path, repeat = new_signal(
+        target, config, "sync", summary, read_evidence(args.evidence), [], ids,
+        fingerprint=f"sync:{short(root, record['rev'])}:{args.status}", attribution=attribution,
+    )
+    if not repeat and args.status == "blocked":
+        # A guess for triage to check, not a finding: nobody has confirmed it.
+        signal["triage"] = {
+            "layer": "spec", "kind": "ambiguous", "confidence": "low",
+            "reasoning": f"The sync stopped to ask: {args.note or '(no question recorded)'}", "confirmed_by": None,
+        }
+        save_signal(target, config, signal)
+    word = "added to open signal" if repeat else "recorded signal"
+    print(f"specloop: {word} {signal['id']} in {path}; commit it from {target}")
 
 
 def cmd_trigger(root, config, args):
@@ -1294,13 +1433,14 @@ def cmd_cleanup(root, config, args):
 def cmd_trailers(root, config, args):
     if args.verify:
         return verify_message(root, config, args.verify)
-    branch = git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
-    record = next(
-        (r for r in load_syncs(root).values() if r.get("branch") == branch and r.get("status") in ("running", "done")), None
-    )
-    docs = spec_docs(root, config)
-    versions = rule_versions(docs, config)
+    record, pending = sync_rule_ids(root, config)
+    versions = rule_versions(spec_docs(root, config), config)
     spec_rev = (record or {}).get("rev") or ""
+    fixes = [i for i in re.split(r"[,\s]+", args.fixes or "") if i]
+    if fixes:
+        known = {r["id"] for r in load_signals(root, config)}
+        if unknown := [i for i in fixes if i not in known]:
+            sys.exit(f"specloop: no signal {', '.join(unknown)} (tools/specloop signals --all lists them)")
     if args.none:
         rules = f"none ({args.none})"
     else:
@@ -1309,12 +1449,10 @@ def cmd_trailers(root, config, args):
             unknown = [i for i in ids if i not in versions]
             if unknown:
                 sys.exit(f"specloop: the spec doesn't define {', '.join(unknown)}")
-        elif record:
-            ids = changed_ids(root, config, record.get("base") or baseline(root, config), record["rev"])
         else:
-            base, diff = pending_diff(root, config)
-            ids = changed_ids(root, config, base) if diff.strip() else []
-            spec_rev = git(root, "rev-parse", "HEAD").strip() if diff.strip() else ""
+            ids = pending
+            if not record and ids:
+                spec_rev = git(root, "rev-parse", "HEAD").strip()
             if not ids:
                 sys.exit(
                     "specloop: no sync on this branch and no pending rules to name. Say which rules this commit "
@@ -1333,6 +1471,8 @@ def cmd_trailers(root, config, args):
             lines.append(f"Harness-Rev: {revs}")
     if record:
         lines.append(f"Sync: {short(root, record['rev'])}")
+    if fixes:
+        lines.append(f"Fixes-Signal: {', '.join(fixes)}")
     print("\n".join(lines))
     return 0
 
@@ -1406,37 +1546,14 @@ def cmd_blame(root, config, args):
 
 def cmd_signal(root, config, args):
     if args.action == "add":
-        evidence = []
-        if args.evidence:
-            text = sys.stdin.read() if args.evidence == "-" else Path(args.evidence).read_text()
-            evidence = [l.rstrip() for l in text.splitlines() if l.strip()][:200]
+        evidence = read_evidence(args.evidence)
         loci = list(dict.fromkeys(
             [f"{resolve_locus(root, p) or p}:{n}" for p, n in map(split_locus, args.locus or [])] + loci_in(root, "\n".join(evidence))[:5]
         ))
-        rules = args.rule or []
-        fingerprint = args.fingerprint or f"{args.source}:{(loci or rules or [args.summary.lower()])[0]}"
-        for record in load_signals(root, config):
-            if record["fingerprint"] == fingerprint and record["resolution"]["status"] == "open":
-                record.setdefault("duplicates", []).append({"received": stamp(), "summary": args.summary, "evidence": evidence[:20]})
-                save_signal(root, config, record)
-                print(f"specloop: same as open signal {record['id']} ({len(record['duplicates'])} repeats); added to it")
-                return 0
-        received = stamp()
-        digest = hashlib.sha1(f"{fingerprint}\0{received}\0{time.time_ns()}".encode()).hexdigest()[:6]
-        record = {
-            "id": f"sig-{now():%Y%m%d}-{digest}",
-            "fingerprint": fingerprint,
-            "source": args.source,
-            "received": received,
-            "summary": args.summary,
-            "evidence": evidence,
-            "locus": loci,
-            "attribution": attribute(root, config, loci, rules),
-            "triage": None,
-            "resolution": {"status": "open", "fix": None},
-            "duplicates": [],
-        }
-        path = save_signal(root, config, record)
+        record, path, repeat = new_signal(root, config, args.source, args.summary, evidence, loci, args.rule or [], args.fingerprint)
+        if repeat:
+            print(f"specloop: same as open signal {record['id']} ({len(record['duplicates'])} repeats); added to it")
+            return 0
         found = record["attribution"]
         print(f"specloop: recorded {record['id']} in {path}")
         print(f"  rules    {', '.join(found['rules']) or 'none traced'}")
@@ -1447,7 +1564,11 @@ def cmd_signal(root, config, args):
 
     record = find_signal(root, config, args.id)
     if args.action == "show":
-        print(json.dumps(record, indent=2))
+        with_status(root, config, [record])
+        shown = {k: v for k, v in record.items() if not k.startswith("_")}
+        if record["_status"] != record["resolution"]["status"]:
+            shown["resolution"] = {"status": record["_status"], "fix": record["_fix"], "by": "Fixes-Signal trailer"}
+        print(json.dumps(shown, indent=2))
         return 0
     if args.action == "triage":
         if args.kind not in LAYERS[args.layer]:
@@ -1475,11 +1596,17 @@ def my_address(root):
 
 
 def cmd_signals(root, config, args):
-    records = sorted(load_signals(root, config), key=lambda r: r["received"], reverse=True)
+    records = sorted(with_status(root, config, load_signals(root, config)), key=lambda r: r["received"], reverse=True)
     if args.rule:
-        records = [r for r in records if any(x.split("@")[0] == args.rule for x in r["attribution"]["rules"])]
+        records = [r for r in records if on_rules(r, {args.rule})]
+    if args.pending:
+        _, ids = sync_rule_ids(root, config)
+        records = [r for r in records if on_rules(r, set(ids)) and is_open(r)]
+        if not records:
+            print(f"No open signals on {', '.join(ids)}." if ids else "Nothing pending, so no signals on pending rules.")
+            return 0
     if not args.by:
-        shown = records if args.all or args.rule else [r for r in records if r["resolution"]["status"] == "open"]
+        shown = records if args.all or args.rule else [r for r in records if is_open(r)]
         if not shown:
             print("No open signals." if not args.all else "No signals.")
         for record in shown:
@@ -1623,6 +1750,19 @@ def cmd_status(root, config, args):
     stale = sorted(set(claims) - defined)
     if stale:
         print(f"stale tags:  {', '.join(stale)}")
+    records = [r for r in with_status(root, config, load_signals(root, config)) if is_open(r)]
+    if records:
+        untriaged = sum(1 for r in records if not r.get("triage"))
+        waiting = sum(1 for r in records if r["_status"] == "fix pending sync")
+        ids = set(changed_ids(root, config, base)) if diff.strip() else set()
+        on_pending = [r for r in records if on_rules(r, ids)]
+        parts = [f"{len(records)} open"]
+        parts += [f"{untriaged} untriaged"] if untriaged else []
+        parts += [f"{waiting} fixed in the spec, waiting for the sync"] if waiting else []
+        parts += [f"{len(on_pending)} on pending rules"] if on_pending else []
+        print(f"signals:     {', '.join(parts)} (tools/specloop signals)")
+        for record in on_pending:
+            print(f"  {record['id']}  {record['summary'][:70]}")
     leftover = cleanup_candidates(root, config)
     if leftover:
         print(f"worktrees:   {len(leftover)} left over from finished or dead syncs (tools/specloop cleanup)")
@@ -1654,6 +1794,9 @@ def main():
     p.add_argument("--session-id", help="Claude Code session ID, for `claude logs`")
     p.add_argument("--log", help="where the launch output went")
     p.add_argument("--harness", choices=HARNESSES, help="which coding agent runs the sync")
+    p.add_argument("--signal", action="store_true", help="with blocked or failed: also record it as a signal")
+    p.add_argument("--evidence", help="with --signal: a file with the failing output or the question")
+    p.add_argument("--model", help="with --signal: the model that ran the sync")
     p = sub.add_parser("cleanup")
     p.add_argument("--dry-run", action="store_true", help="say what would be removed")
     p.add_argument("--quiet", action="store_true", help="only report removals")
@@ -1665,6 +1808,7 @@ def main():
     p.add_argument("--none", metavar="REASON", help="no rule covers this commit, e.g. deps, format, rename")
     p.add_argument("--model", help="the model building the change, for Harness")
     p.add_argument("--human", action="store_true", help="written by hand: Harness: human")
+    p.add_argument("--fixes", metavar="IDS", help="signals this commit fixes (comma-separated): Fixes-Signal")
     p.add_argument("--verify", metavar="MSGFILE", help=argparse.SUPPRESS)  # the commit-msg hook
     p = sub.add_parser("blame")
     p.add_argument("locus", nargs="?", help="FILE:LINE, e.g. from a stack frame")
@@ -1697,6 +1841,7 @@ def main():
     p = sub.add_parser("signals")
     p.add_argument("--all", action="store_true", help="resolved ones too")
     p.add_argument("--rule", help="only signals traced to this rule")
+    p.add_argument("--pending", action="store_true", help="open signals on the rules this sync (or the pending spec change) touches")
     p.add_argument("--by", choices=["layer", "harness"], help="counts of confirmed signals")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")

@@ -71,9 +71,9 @@ tools/specloop signal triage <id> --layer <layer> --kind <kind> \
 ## 4. Draft the fix (don't apply it)
 
 Draft the fix for that layer:
-- **spec:** the exact rule text to change or add, with its ID (a new rule gets a new number; IDs are never reused), ready for a spec PR. Once it merges, `/spec-sync` builds it.
-- **implementation:** what's wrong in the code, by rule ID. Suggest a re-sync or a hand fix with trailers naming the rule.
-- **verification:** the test to add or strengthen, tagged with the rule ID.
+- **spec:** the exact rule text to change or add, with its ID (a new rule gets a new number; IDs are never reused), ready for a spec PR whose commit ends with `Fixes-Signal: <id>`. Once it merges, `/spec-sync` builds it, sees the signal through `signals --pending`, and the signal closes when the code is built.
+- **implementation:** what's wrong in the code, by rule ID. Suggest a re-sync or a hand fix whose trailers name the rule and the signal: `tools/specloop trailers --rules <ID> --human --fixes <id>`.
+- **verification:** the test to add or strengthen, tagged with the rule ID, committed with `Fixes-Signal: <id>`.
 - **harness:** a dated entry for `docs/lessons.md` (what happened, the takeaway). Then run `tools/specloop signals --by harness`. Propose a change to the skill or `CLAUDE.md` **only** if it reports a pattern for this layer and kind, and cite the signal IDs it lists. One bad session isn't evidence about the instructions.
 - **outside:** where it should go instead.
 
@@ -91,4 +91,6 @@ Then ask the user to confirm the triage. Unconfirmed triage counts for nothing i
 tools/specloop signal confirm <id>
 ```
 
-Once the fix lands, close the signal: `tools/specloop signal resolve <id> --status fixed --fix "<PR, commit or lesson>"`. Use `wontfix` for a signal you won't act on and `duplicate` for one that turned out to be the same as another.
+A fix whose commit says `Fixes-Signal: <id>` closes the signal by itself once it's on the default branch. A spec change closes it once the sync that builds it is merged. Close it by hand only when no commit will: `tools/specloop signal resolve <id> --status fixed --fix "<lesson or link>"` (a harness lesson, an outside fix), `wontfix` for one you won't act on, `duplicate` for one that's the same as another.
+
+Commit the signal file with the fix, or on its own, so the rest of the team sees it.

@@ -93,26 +93,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # the ledger and the reused-ID check need history
-      - run: tools/specloop check --format github
-```
-
-To let spec-only pull requests through while still gating the default branch:
-
-```yaml
-      - run: tools/specloop check --format github ${{ github.event_name == 'pull_request' && '--allow-pending' || '' }}
-```
-
-To check trailers too: on a pull request, the PR's own commits; on a push, what the push brought in, which catches a squash merge that dropped them.
-
-```yaml
+          fetch-depth: 0   # the ledger, the reused-ID check and the trailers need history
       - run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
             range="origin/${{ github.base_ref }}..HEAD"
-          else
+          elif [ "${{ github.event.before }}" != 0000000000000000000000000000000000000000 ]; then
             range="${{ github.event.before }}..${{ github.sha }}"
           fi
-          tools/specloop check --format github --trailers "$range"
+          tools/specloop check --format github ${range:+--trailers "$range"}
+```
+
+This checks trailers on the commits each run brings in: a pull request's own commits, or what a push added to the branch. The push check is what catches a squash merge that dropped them. A branch's first push has no `before` to compare with, so it skips the trailer check.
+
+Leave out `--trailers` only if you don't want attribution. Without it, a hand-written commit with no trailers goes in silently, and the code it touches can't be traced from then on.
+
+To let spec-only pull requests through while still gating the default branch, add `--allow-pending` on pull requests:
+
+```yaml
+          tools/specloop check --format github ${range:+--trailers "$range"} \
+            ${{ github.event_name == 'pull_request' && '--allow-pending' || '' }}
 ```
 
 The same check runs locally on each commit if you set `"trailers": {"hook": true}` in `specloop.json` and have the hooks enabled (`core.hooksPath tools/githooks`). `git commit --no-verify` skips it once.

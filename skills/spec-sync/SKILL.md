@@ -20,6 +20,7 @@ tools/specloop pending --ids   # the rule IDs on changed lines
 
 - If nothing is pending, report that the spec and the code already match, and stop.
 - If the spec has uncommitted edits, stop and ask the user to commit them first. A sync only works from committed spec revisions.
+- Check the feedback on those rules: `tools/specloop signals --pending` lists open signals (crashes, QA reports, review comments, earlier syncs that stopped) traced to the rules this sync touches. Read each with `tools/specloop signal show <id>`. A spec change is often the fix for one of them, so the code and tests you write should make it go away. Note which ones you address.
 - Read more than the diff. For a single file, read all of it. For a tree, read the overview, every doc the diff touches, and the docs those link to. A change in one feature often affects rules in another.
 
 ## 2. Branch
@@ -38,7 +39,7 @@ tools/specloop sync running
 ## 3. Plan, then build
 
 - Turn each diff hunk into concrete code changes, and name the rule IDs you're addressing.
-- **Never edit the spec**, in any of its docs. If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Run `tools/specloop sync blocked --note "<the question, one line>"` and put the question in your report instead of guessing.
+- **Never edit the spec**, in any of its docs. If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Run `tools/specloop sync blocked --note "<the question, one line>" --signal --model <your model ID>` and put the question in your report instead of guessing. `--signal` records the question as a signal on these rules, so it's traced and triaged like any other feedback.
 - Follow the project's existing conventions (see `CLAUDE.md`). If `CLAUDE.md` has a **Spec sync rules** section, those rules apply on top of this skill. That's where project-specific checks go, such as evaluation numbers for model thresholds or store copy to keep in step.
 - Every rule you add or change gets a test. Tag the test with the rule IDs at the start of its name, before the first colon: `@Test("XP-6: …")`, `it("XP-6: …")`, `@pytest.mark.spec("XP-6")`, or a `// Spec: XP-6` comment above the test.
 - If the diff renames or removes an ID, update the tests that name it.
@@ -59,19 +60,23 @@ tools/specloop coverage --ids "$(tools/specloop pending --ids | paste -sd, -)"
 
 ```bash
 tools/specloop mark HEAD                         # before making your own commit; HEAD is the spec revision you implemented
-tools/specloop trailers --model <your model ID>  # the trailer block for this sync's commit
+tools/specloop trailers --model <your model ID> [--fixes <signal IDs>]  # the trailer block for this sync's commit
 ```
 
 - Make one commit with the code, the tests and the ledger. Use the message `Spec sync: <one-line summary>`, then a body saying what changed by rule ID, then a blank line and the trailer block **exactly as `trailers` printed it**. The trailers are how a later crash or review comment is traced back to these rules and to this harness, so don't edit or drop them.
 - `--model` is the model ID you're running as (e.g. `claude-opus-5-5`). Leave it out only if you don't know it.
+- `--fixes` names the signals from step 1 that this commit fixes. It adds `Fixes-Signal:`, which closes each one once the branch is merged. Name only the ones your code and tests actually address.
 - **Don't** push or merge into the default branch. The user reviews and merges.
 
 Then record the outcome:
 
 ```bash
 tools/specloop sync done                              # committed, ready for review
-tools/specloop sync failed --note "<what broke>"      # tests or coverage won't pass and you're stopping
+tools/specloop sync failed --note "<what broke>" --signal --evidence <file> --model <your model ID>
+                                                      # tests or coverage won't pass and you're stopping
 ```
+
+For a failure, save the failing test or coverage output to a file and pass it as `--evidence`. The signal goes to the main work tree, not this worktree, because a stopped sync's worktree is cleaned up. Tests that fail while you're still working aren't signals; only a sync that stops is.
 
 Always record one of `done`, `blocked` or `failed` before you finish. Otherwise `status` shows the sync as running until it goes stale.
 
@@ -81,6 +86,7 @@ Keep it short:
 - the branch to review, and that it's checked out in this worktree (`git rev-parse --show-toplevel`) if the hook started you. The worktree is removed automatically once the branch is merged.
 - to share it as a pull request, the user pushes the branch; you don't. Give them a PR description that ends with the same trailer block, because a squash merge of a one-commit PR can use the description as the commit message.
 - what changed, by rule ID
+- which open signals it fixes, and any on these rules it doesn't
 - test and coverage results
 - anything you couldn't verify
 - open questions about the spec

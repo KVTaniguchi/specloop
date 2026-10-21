@@ -133,6 +133,25 @@ One record per piece of feedback, one file per record under `docs/signals/` (`si
 - **Sources** are open-ended strings: `test`, `crash`, `qa`, `review`, `user`, `telemetry`. specloop doesn't pull from any of them. `specloop signal add` takes a file or standard input (a pasted stack trace, a comment), and adapters for crash reporters or issue trackers can call the same command. Nothing specloop ships talks to a network.
 - **Resolution** links to what fixed it: a spec PR, a sync, a test commit, a skill change, a lesson. `status` is `open`, `fixed`, `wontfix` or `duplicate`.
 
+### Closing signals
+
+A commit that fixes a signal says so in a trailer, `Fixes-Signal: sig-20261021-7c3e9a` (`specloop trailers --fixes <id>` adds it). A signal is fixed once such a commit is on `HEAD`, which for most clones means merged into the default branch. Nothing has to edit the record, so everyone who pulls the fix sees the signal close.
+
+A fix that changes the spec isn't a fix until the code catches up. Until the ledger reaches that commit, the signal shows as `fix pending sync`, and it still counts as open.
+
+`signal resolve` is for what no commit will close: a harness lesson, a fix outside the repo, `wontfix`, `duplicate`. A status stored there wins over the trailers.
+
+### Where signals come from
+
+- **People and agents**, through `/spec-triage` or `specloop signal add`.
+- **Syncs that stop.** `specloop sync blocked --signal` and `sync failed --signal` record the sync as a signal on the rules it was building, with source `sync` and the sync's harness. A blocked sync usually means the rule is ambiguous, so its signal comes with an unconfirmed `spec/ambiguous` guess for triage to check. These signals go to the main work tree, because the stopped sync's worktree is about to be cleaned up.
+
+### Where signals show up
+
+- `specloop status` counts open signals, the untriaged ones, and those waiting for a sync, and lists the ones on pending rules.
+- `/spec-sync` starts with `specloop signals --pending`, the open signals on the rules it's about to build, so a spec change made to fix a signal is built with that signal in mind. It names the ones it fixes with `trailers --fixes`.
+- `signals` in a sync's worktree also reads the main work tree, so a signal recorded there but not committed yet still reaches the sync.
+
 ## 4. Triage
 
 Each signal is blamed on one layer. The layer decides what kind of fix it gets. This list borrows from IBM's Orthogonal Defect Classification, which classifies defects by where they were introduced so the counts can steer the process.
@@ -211,9 +230,9 @@ Each step is useful if the later ones never ship.
 
 | # | Step (all built) | Done when |
 |---|---|---|
-| 1 | **Trailers.** `specloop trailers`; `/spec-sync` writes them in commits and PR descriptions; `check --trailers` in CI; the template `CLAUDE.md` asks for them on hand-written commits | A week of commits on the iOS project all carry trailers, including after squash merges |
+| 1 | **Trailers.** `specloop trailers`; `/spec-sync` writes them in commits and PR descriptions; `check --trailers` in the CI setup; the template `CLAUDE.md` asks for them on hand-written commits | A week of commits on the iOS project all carry trailers, including after squash merges |
 | 2 | **`specloop blame`** for `file:line`, `--test`, `--rule`, `--commit`, reading trailers from anywhere in a message | A real crash frame and a real failing test both trace to the right rule and sync |
-| 3 | **Signal records.** `specloop signal add`, fingerprinting and duplicates, `docs/signals/` | The next three real problems on the iOS project are recorded as signals, not just fixed |
+| 3 | **Signal records.** `specloop signal add`, fingerprinting and duplicates, `docs/signals/`, `Fixes-Signal`, stopped syncs as signals, open signals in `status` and `/spec-sync` | The next three real problems on the iOS project are recorded as signals, not just fixed |
 | 4 | **`/spec-triage`** with the layer table | It classifies those signals, and the person confirming agrees with most of them |
 | 5 | **`specloop signals` reports** and the harness threshold | There's enough data for `--by harness` to compare two `Harness-Rev`s |
 
