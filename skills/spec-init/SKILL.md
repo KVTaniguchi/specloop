@@ -20,8 +20,15 @@ Read the code, not just the README: models, services and every screen or endpoin
 
 ## 3. Draft the spec
 
-Start from `templates/SPEC.md`.
-- **Give every rule a stable ID** in bold: `**PREFIX-N:**`. Use one prefix per area (`XP`, `SCAN`, `AUTH`). IDs are permanent: retire one rather than reuse it.
+A spec is a tree of docs (the default, `"spec": "docs/spec"`), or one file for a small project (`"spec": "docs/SPEC.md"`).
+
+For a tree, start from `templates/spec/`:
+- **`README.md` is the overview:** what the product is, its pillars and non-goals, and a link to every feature doc. Rules that cut across features go here too.
+- **One doc per feature**, from `templates/spec/feature.md`, e.g. `docs/spec/scanning.md`. A large feature can be a folder with its own `README.md` that links to its parts.
+- **Every doc must be reachable by links from the overview.** `tools/specloop check` fails on broken links and on docs nothing links to.
+
+Either way:
+- **Give every rule a stable ID** in bold: `**PREFIX-N:**`. Use one prefix per area (`XP`, `SCAN`, `AUTH`). In a tree, one prefix per feature doc keeps them easy to find. IDs are unique across the whole spec, and permanent: retire one rather than reuse it.
 - **One checkable claim per ID.** A rule is "level n takes 50·n·(n−1) XP", not "levels feel fair".
 - **Tables are rules too.** Give each table its own ID in the line above it.
 - **Write down quirks as they are** (for example, "the Map tab hosts the camera"). If you think one is a bug, tell the user; don't fix it in the spec.
@@ -42,6 +49,7 @@ The baseline needs two commits, because a commit can't contain its own SHA:
 SPEC_SYNC=off git commit -m "Add spec and specloop"   # off: don't start a sync for the baseline
 tools/specloop mark HEAD
 git commit -m "Mark spec as implemented" docs/.spec-implemented
+tools/specloop check                                  # links, IDs and tags all line up
 ```
 
 ## 6. Report

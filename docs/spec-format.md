@@ -2,6 +2,18 @@
 
 A spec is ordinary Markdown with one convention: **every rule has a stable ID, in bold, where it's defined.**
 
+## The tree
+
+Point `spec` in `specloop.json` at a directory (`"spec": "docs/spec"`) and every `.md` file under it is part of the spec:
+
+- **`README.md` at the top is the overview.** It says what the product is, lists its non-goals, and links to every feature doc. Rules that cut across features live here.
+- **One doc per feature**, with its own ID prefix. A feature that grows can become a folder with its own `README.md` linking to its parts.
+- **Links hold it together.** `specloop check` fails when a link points at a spec doc that doesn't exist, or when a doc can't be reached by following links from the overview. Link to a folder with a trailing slash (`[Billing](billing/)`) to mean its `README.md`.
+- **IDs are unique across the tree.** Moving a rule to another doc keeps its ID; that isn't a reuse.
+- **Renaming a doc** counts as removing it and adding it, so its rules show as pending. Rename in a commit of its own with `SPEC_SYNC=off`, then `specloop mark`.
+
+A small project can keep one file (`"spec": "docs/SPEC.md"`). Everything below applies to both.
+
 ```markdown
 - **XP-2:** Picking a different breed pays the scanner's XP, not the picked breed's.
 ```
@@ -29,7 +41,7 @@ A spec is ordinary Markdown with one convention: **every rule has a stable ID, i
 
 ## Sections
 
-The template's order works for most projects:
+The overview template ([templates/spec/README.md](../templates/spec/README.md)) has product, features, cross-cutting rules, and how the spec works. Each feature doc ([templates/spec/feature.md](../templates/spec/feature.md)) has rules, then screens or interfaces. For a single-file spec, this order works for most projects:
 1. **Product:** what it is, pillars, non-goals
 2. **Rules:** logic that can be checked without UI. Aim for full test coverage here.
 3. **Screens / interfaces:** what users see and do

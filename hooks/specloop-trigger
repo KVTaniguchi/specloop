@@ -2,14 +2,15 @@
 #
 # specloop trigger, shared by the post-commit, post-merge and post-rewrite
 # hooks. When an update brings in a spec change the code doesn't match yet,
-# start a background Claude Code session in its own worktree that runs
-# /spec-sync and leaves the implementation on a <branchPrefix><sha> branch
-# for review.
+# start a background coding agent in its own worktree that runs /spec-sync
+# and leaves the implementation on a <branchPrefix><sha> branch for review.
+# The agent is Claude Code or Cursor (`tools/specloop harness`).
 #
 #   specloop-trigger commit           after a commit (compares with HEAD^1)
 #   specloop-trigger merge|rebase     after a merge, pull or rebase (compares with ORIG_HEAD)
 #
 # Enable once per clone:   git config core.hooksPath tools/githooks
+# Pick your agent:         git config specloop.harness cursor   (default: claude)
 # Skip for one update:     SPEC_SYNC=off git commit ...   (or merge, pull)
 # Test without launching:  SPEC_SYNC=dry-run git commit ...   (also dry-runs cleanup)
 # Watch / attach:          tools/specloop status   |   claude agents
@@ -56,21 +57,67 @@ fi
 
 short=$(git rev-parse --short HEAD)
 session="Spec sync $short"
+harness=$("$specloop" harness) || exit 0
 
-if ! command -v claude >/dev/null 2>&1; then
-    echo "specloop: claude CLI not found — run /spec-sync manually for $short"
-    exit 0
+if [ "$harness" = cursor ]; then
+    agent=$(command -v agent || command -v cursor-agent)
+    if [ -z "$agent" ]; then
+        echo "specloop: Cursor's agent CLI not found — run /spec-sync in Cursor for $short"
+        exit 0
+    fi
+else
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "specloop: claude CLI not found — run /spec-sync manually for $short"
+        exit 0
+    fi
 fi
 
 if [ "$SPEC_SYNC" = "dry-run" ]; then
-    echo "specloop: would start background session '$session'"
+    echo "specloop: would start background $harness session '$session'"
     exit 0
 fi
 
-common=$(git rev-parse --git-common-dir)
+# Absolute: the Cursor agent starts from inside its worktree.
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
 logs="$common/specloop/logs"
 mkdir -p "$logs"
 log="$logs/$short.log"
+
+if [ "$harness" = cursor ]; then
+    # Cursor's agent has no background mode, so the hook makes the worktree,
+    # starts the agent in it, and locks the worktree with the agent's pid the
+    # way Claude Code does. Cleanup reads that lock.
+    tree="$root/.specloop/worktrees/spec-sync-$short"
+    branch="$prefix$short"
+    if ! git check-ignore -q "$tree"; then
+        mkdir -p "$common/info"
+        printf '.specloop/worktrees/\n' >> "$common/info/exclude"
+    fi
+    "$specloop" sync starting --session "$session" --log "$log" --harness cursor >/dev/null
+    if ! out=$(git worktree add -q -b "$branch" "$tree" HEAD 2>&1); then
+        "$specloop" sync failed --rev HEAD --note "couldn't make the worktree: $out" >/dev/null
+        echo "specloop: couldn't make the worktree ($out) — run /spec-sync manually for $short"
+        exit 0
+    fi
+    prompt="Run a spec sync: follow .claude/skills/spec-sync/SKILL.md in this repository step by step. You were started by the specloop hook, in a worktree already on the branch $branch."
+    (cd "$tree" && exec nohup "$agent" -p --force --trust --workspace "$tree" "$prompt" >"$log" 2>&1 </dev/null) &
+    pid=$!
+    git worktree lock --reason "cursor agent session spec-sync-$short (pid $pid)" "$tree"
+    # A logged-out or misconfigured agent exits at once, before reporting in.
+    sleep 1
+    record="$common/specloop/syncs/$(git rev-parse HEAD).json"
+    # The agent is this shell's child, so once it exits it's a zombie until
+    # the hook ends, and kill -0 would still find it. Ask ps instead.
+    case "$(ps -o stat= -p "$pid" 2>/dev/null)" in ""|Z*) alive=no ;; *) alive=yes ;; esac
+    if [ "$alive" = no ] && grep -q '"status": "starting"' "$record" 2>/dev/null; then
+        reason=$(grep -v '^ *$' "$log" | head -n 1)
+        "$specloop" sync failed --rev HEAD --note "agent exited at once: ${reason:-no output}" >/dev/null
+        echo "specloop: Cursor's agent exited at once: ${reason:-see $log} — run /spec-sync manually for $short"
+        exit 0
+    fi
+    echo "specloop: started background Cursor agent '$session' (tools/specloop status to follow it, output in $log)"
+    exit 0
+fi
 
 # Claude Code doesn't hide its worktrees from git, so a `git add -A` here
 # would stage one as an embedded repository. Exclude them in this clone.

@@ -15,9 +15,15 @@ The hooks in `tools/githooks/` run after every way a spec change can reach a clo
 Each one calls `tools/specloop trigger`, which starts a sync only when all three are true:
 1. the update changed the spec,
 2. the code doesn't match the spec at `HEAD` yet (a pull of an already-synced change starts nothing), and
-3. no other sync is starting or running in this clone.
+3. no other sync is starting or running in this clone, and
+4. you wrote the spec change (with `sync.trigger` at its default, `mine`).
 
-Every sync has a record in `.git/specloop/syncs/`, outside the work tree, so all worktrees of a clone share it. The hook picks the session's ID, writes `starting`, and sends the launch output to `.git/specloop/logs/<sha>.log`. A session that dies after launch usually explains why only in its own output, so `status` points at `claude logs <id>` for those. `/spec-sync` then reports `running`, followed by `done`, `blocked` or `failed`, through `tools/specloop sync <status>`.
+The fourth one is how specloop avoids collisions without a server. A spec PR merged on GitHub reaches everyone who pulls, and every clone with the hook enabled would otherwise start building it. Instead, only the clone whose `user.email` (or any `git config specloop.email`) matches the author of a spec commit in the update starts a sync. Everyone else sees the revision in `status` as `not started  by <author>, so the hook left it to them`, and can take it over with `/spec-sync`. Set `"trigger": "all"` under `sync` if you work alone across addresses or want every clone to build.
+
+Every sync has a record in `.git/specloop/syncs/`, outside the work tree, so all worktrees of a clone share it. The hook writes `starting` and sends the launch output to `.git/specloop/logs/<sha>.log`.
+
+- **Claude Code** (`claude --bg`) picks the session's ID, which the hook records. A session that dies after launch usually explains why only in its own output, so `status` points at `claude logs <id>` for those.
+- **Cursor** (`agent -p`) has no background mode, so the hook makes the worktree and branch itself, starts the agent there in the background, and writes all of its output to the log. If the agent exits within a second without reporting in, as it does when it isn't logged in, the hook marks the sync `failed` with the first line of its output. `/spec-sync` then reports `running`, followed by `done`, `blocked` or `failed`, through `tools/specloop sync <status>`.
 
 `tools/specloop status` turns those records, the ledger and the branches into one line per pending spec revision:
 
@@ -44,7 +50,7 @@ A launch that went quiet (`failed to start?`, `stalled?`) no longer stops the ho
 
 ## Cleaning up worktrees
 
-Each sync runs in a worktree that Claude Code creates and locks: `.claude/worktrees/spec-sync-<sha>`. Claude Code doesn't remove it when the session finishes. While a sync waits for review, its branch is checked out there, so you can `cd` into it to run the change, or `claude attach` to the session to ask about it.
+Each sync runs in a worktree locked with its agent's pid: `.claude/worktrees/spec-sync-<sha>`, which Claude Code creates, or `.specloop/worktrees/spec-sync-<sha>`, which the hook creates for Cursor. Neither agent removes it when it finishes. While a sync waits for review, its branch is checked out there, so you can `cd` into it to run the change, or `claude attach` to the session to ask about it.
 
 `tools/specloop cleanup` removes these worktrees once they're no longer needed, and the hooks run it after every commit, merge and rebase. A worktree goes when either:
 - **the sync is implemented:** the ledger has reached its revision, usually because you merged its branch. Its session is stopped first if it's still open.
@@ -54,9 +60,9 @@ It never touches:
 - worktrees with any other name
 - a sync that's running, waiting for review, or blocked on a question (you can still attach and answer it)
 - a worktree with uncommitted changes
-- a worktree locked by anything other than a Claude Code session
+- a worktree locked by anything other than a sync's agent
 
-The branch is deleted when it's merged or has no commits of its own. Otherwise it's kept and the message says so. A squash-merged branch is one example. `claude rm` then clears the session from `claude agents`.
+The branch is deleted when it's merged or has no commits of its own. Otherwise it's kept and the message says so. A squash-merged branch is one example. For Claude Code, `claude rm` then clears the session from `claude agents`. A Cursor agent that's still open is stopped by its pid.
 
 `status` reports leftover worktrees, and `cleanup --dry-run` shows what would go. `SPEC_SYNC=dry-run` also makes the hooks dry-run their cleanup.
 
@@ -64,7 +70,8 @@ The branch is deleted when it's merged or has no commits of its own. Otherwise i
 
 `specloop check` gathers the checks a build should enforce and exits 1 if any of them fails:
 
-- every ID is defined once
+- for a spec tree: every link to a spec doc resolves, and every doc can be reached from the overview
+- every ID is defined once, across all docs
 - no ID came back with a different meaning: a removed ID that is defined again with different rule text is an error. A straight restore, such as a revert, is fine. List deliberate exceptions under `check.allowReused`.
 - no test names an ID the spec doesn't define (stale tags)
 - every ID under the required prefixes (`sync.require`, or `--require`) has a test

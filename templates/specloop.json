@@ -1,5 +1,5 @@
 {
-  "spec": "docs/SPEC.md",
+  "spec": "docs/spec",
   "ledger": "docs/.spec-implemented",
   "tests": {
     "paths": ["tests"],
@@ -11,6 +11,8 @@
   "sync": {
     "branchPrefix": "spec-sync/",
     "require": [],
-    "permissionMode": "auto"
+    "permissionMode": "auto",
+    "trigger": "mine",
+    "harness": "claude"
   }
 }

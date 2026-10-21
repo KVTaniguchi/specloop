@@ -16,10 +16,16 @@ specloop — keep a spec, the code, and the tests in lockstep.
                                      updates the given fields.
     specloop trigger [--since REV]   exit 0 if the hook should start a sync now
     specloop cleanup [--dry-run]     remove sync worktrees that are merged or dead
+    specloop harness                 print the coding agent the hook starts here
+                                     (claude or cursor)
     specloop config [KEY]            print config (dotted KEY, e.g. sync.branchPrefix)
 
 Configuration lives in specloop.json at the project root (found by walking up
 from the current directory). Python 3.8+, standard library only.
+
+The spec is either one Markdown file ("spec": "docs/SPEC.md") or a tree of
+them ("spec": "docs/spec"): every .md file under that directory, with
+README.md at its top as the overview that links to the feature docs.
 """
 
 import argparse
@@ -27,6 +33,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -47,9 +54,25 @@ DEFAULTS = {
         "extraPatterns": [],
     },
     "commands": {"test": ""},
-    "sync": {"branchPrefix": "spec-sync/", "require": [], "permissionMode": "auto", "staleAfterMinutes": 120},
+    "sync": {
+        "branchPrefix": "spec-sync/",
+        "require": [],
+        "permissionMode": "auto",
+        "staleAfterMinutes": 120,
+        # "mine": the hook only starts a sync for spec changes you authored, so
+        # everyone who pulls a merged spec PR doesn't build it at once. "all":
+        # any spec change that arrives.
+        "trigger": "mine",
+        # claude or cursor. Each person can pick their own with
+        # `git config specloop.harness cursor`, which wins over this.
+        "harness": "claude",
+    },
     "check": {"allowReused": []},
 }
+
+HARNESSES = ("claude", "cursor")
+# The overview doc at the top of a spec tree.
+TREE_ROOT = "README.md"
 
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 # A session that hasn't reported in this long after the hook launched it
@@ -115,6 +138,115 @@ def git(root, *args, check=True):
     return result.stdout
 
 
+# MARK: spec files
+#
+# Everything below works on a list of (path, text) docs. A single-file spec is
+# a list of one; a tree lists its overview first, then the rest by path.
+
+
+def is_tree(config):
+    return not config["spec"].endswith(".md")
+
+
+def spec_dir(config):
+    return config["spec"].rstrip("/")
+
+
+def spec_root(config):
+    """The doc a reader starts from: the file itself, or the tree's overview."""
+    return f"{spec_dir(config)}/{TREE_ROOT}" if is_tree(config) else config["spec"]
+
+
+def spec_pathspec(config):
+    """What to hand git to mean "the spec"."""
+    return f":(glob){spec_dir(config)}/**/*.md" if is_tree(config) else config["spec"]
+
+
+def spec_order(config, paths):
+    root = spec_root(config)
+    return sorted(paths, key=lambda p: (p != root, p))
+
+
+def spec_docs(root, config, rev=None):
+    """(path, text) for every spec doc in the work tree, or at `rev`."""
+    if not is_tree(config):
+        spec = config["spec"]
+        if rev is None:
+            path = root / spec
+            return [(spec, path.read_text())] if path.exists() else []
+        if not succeeds(root, "cat-file", "-e", f"{rev}:{spec}"):
+            return []
+        return [(spec, git(root, "show", f"{rev}:{spec}"))]
+    if rev is None:
+        base = root / spec_dir(config)
+        paths = [p.relative_to(root).as_posix() for p in base.rglob("*.md") if p.is_file()] if base.exists() else []
+    else:
+        listed = git(root, "ls-tree", "-r", "--name-only", rev, "--", spec_dir(config), check=False).split("\n")
+        paths = [p for p in listed if p.endswith(".md")]
+    if rev is None:
+        return [(p, (root / p).read_text()) for p in spec_order(config, paths)]
+    return [(p, git(root, "show", f"{rev}:{p}", check=False)) for p in spec_order(config, paths)]
+
+
+def spec_label(config, path, section):
+    """A coverage heading: the section, plus which doc it's in for a tree."""
+    if not is_tree(config):
+        return section
+    doc = os.path.relpath(path, spec_dir(config))
+    return f"{doc} · {section}" if section else doc
+
+
+LINK = re.compile(r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?(?:\s+\"[^\"]*\")?\s*\)")
+
+
+def doc_links(config, path, text):
+    """(line number, target path) for each link in `path` to another .md file
+    or a directory, resolved relative to `path`. Web links and anchors are skipped."""
+    found = []
+    for number, line in enumerate(text.splitlines(), 1):
+        for target in LINK.findall(line):
+            target = target.split("#", 1)[0]
+            if not target or re.match(r"^[a-z][a-z0-9+.-]*:", target, re.I) or target.startswith("/"):
+                continue
+            resolved = os.path.normpath(os.path.join(os.path.dirname(path), target)).replace(os.sep, "/")
+            if target.endswith("/"):
+                resolved = f"{resolved}/{TREE_ROOT}"
+            elif not target.endswith(".md"):
+                continue
+            found.append((number, resolved))
+    return found
+
+
+def tree_findings(config, docs):
+    """(level, message, path, line) for broken links and for docs the overview
+    can't reach. Only for a tree: that's what makes it one."""
+    if not is_tree(config):
+        return []
+    findings, present, root = [], {p for p, _ in docs}, spec_root(config)
+    if root not in present:
+        return [("error", f"{root} doesn't exist. A spec tree starts from an overview there that links to the feature docs.", None, None)]
+    inside = spec_dir(config) + "/"
+    links = {p: doc_links(config, p, t) for p, t in docs}
+    for path, found in links.items():
+        for number, target in found:
+            if target.startswith(inside) and target not in present:
+                findings.append(("error", f"Links to {target}, which doesn't exist.", path, number))
+    reached, queue = {root}, [root]
+    while queue:
+        for _, target in links.get(queue.pop(), []):
+            if target in present and target not in reached:
+                reached.add(target)
+                queue.append(target)
+    for path in spec_order(config, present - reached):
+        findings.append((
+            "error",
+            f"Nothing links to {path} from {root} or the docs it links to. Link it from its parent so readers can find it.",
+            path,
+            1,
+        ))
+    return findings
+
+
 # MARK: spec + ledger
 
 
@@ -131,17 +263,22 @@ def definitions(text, config):
 
 
 def spec_ids(root, config):
-    """Ordered (id, section heading) pairs as defined in the spec."""
-    return [(i, section) for i, _, section in definitions((root / config["spec"]).read_text(), config)]
+    """Ordered (id, section label) pairs as defined across the spec."""
+    return [
+        (i, spec_label(config, path, section))
+        for path, text in spec_docs(root, config)
+        for i, _, section in definitions(text, config)
+    ]
 
 
-def rule_texts(text, config):
+def rule_texts(docs, config):
     """Map of ID -> its rule's text (every line it owns, whitespace-normalized)."""
-    owner = owning_ids(text, config)
     texts = defaultdict(list)
-    for number, line in enumerate(text.splitlines(), 1):
-        if owner.get(number) and line.strip():
-            texts[owner[number]].append(" ".join(line.split()))
+    for _, text in docs:
+        owner = owning_ids(text, config)
+        for number, line in enumerate(text.splitlines(), 1):
+            if owner.get(number) and line.strip():
+                texts[owner[number]].append(" ".join(line.split()))
     return {i: "\n".join(lines) for i, lines in texts.items()}
 
 
@@ -162,7 +299,7 @@ def baseline(root, config):
     """The implemented revision: the ledger, else the commit that added the spec."""
     if rev := ledger_rev(root, config):
         return rev
-    added = git(root, "log", "--diff-filter=A", "--format=%H", "--", config["spec"]).split()
+    added = git(root, "log", "--diff-filter=A", "--format=%H", "--", spec_pathspec(config)).split()
     return added[-1] if added else None
 
 
@@ -180,7 +317,7 @@ def pending_diff(root, config):
         return None, ""
     if not commit_exists(root, base):
         sys.exit(missing_ledger_message(root, config, base))
-    return base, git(root, "diff", base, "HEAD", "--", config["spec"])
+    return base, git(root, "diff", base, "HEAD", "--", spec_pathspec(config))
 
 
 def owning_ids(text, config):
@@ -198,11 +335,9 @@ def owning_ids(text, config):
 
 
 def changed_ids(root, config, base):
-    """IDs whose rule text changed between `base` and HEAD, in spec order."""
-    spec = config["spec"]
-    old = git(root, "show", f"{base}:{spec}", check=False)
-    new = git(root, "show", f"HEAD:{spec}", check=False)
-    old_owner, new_owner = owning_ids(old, config), owning_ids(new, config)
+    """IDs whose rule text changed between `base` and HEAD, in spec order.
+    A doc that moved counts as removed and added, so its IDs all show."""
+    old_docs, new_docs = dict(spec_docs(root, config, base)), dict(spec_docs(root, config, "HEAD"))
     id_re = re.compile(config["idPattern"])
     found = []
 
@@ -210,20 +345,23 @@ def changed_ids(root, config, base):
         if spec_id and spec_id not in found:
             found.append(spec_id)
 
-    old_line = new_line = 0
-    for line in git(root, "diff", "-U0", base, "HEAD", "--", spec).splitlines():
-        if hunk := re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line):
-            old_line, new_line = int(hunk.group(1)), int(hunk.group(2))
-        elif line.startswith("+") and not line.startswith("+++"):
-            for spec_id in id_re.findall(line):
-                add(spec_id)
-            add(new_owner.get(new_line))
-            new_line += 1
-        elif line.startswith("-") and not line.startswith("---"):
-            for spec_id in id_re.findall(line):
-                add(spec_id)
-            add(old_owner.get(old_line))
-            old_line += 1
+    for path in spec_order(config, set(old_docs) | set(new_docs)):
+        old_owner = owning_ids(old_docs.get(path, ""), config)
+        new_owner = owning_ids(new_docs.get(path, ""), config)
+        old_line = new_line = 0
+        for line in git(root, "diff", "-U0", "--no-renames", base, "HEAD", "--", path).splitlines():
+            if hunk := re.match(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@", line):
+                old_line, new_line = int(hunk.group(1)), int(hunk.group(2))
+            elif line.startswith("+") and not line.startswith("+++"):
+                for spec_id in id_re.findall(line):
+                    add(spec_id)
+                add(new_owner.get(new_line))
+                new_line += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                for spec_id in id_re.findall(line):
+                    add(spec_id)
+                add(old_owner.get(old_line))
+                old_line += 1
     return found
 
 
@@ -349,6 +487,25 @@ def succeeds(root, *args):
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=GIT_ENV).returncode == 0
 
 
+def my_emails(root):
+    """The addresses that count as you: user.email, plus any `specloop.email`
+    (e.g. the noreply address GitHub puts on your squash merges)."""
+    found = git(root, "config", "--get-all", "user.email", check=False).split()
+    found += git(root, "config", "--get-all", "specloop.email", check=False).split()
+    return {e.lower() for e in found}
+
+
+def commit_author(root, rev):
+    return git(root, "log", "-1", "--format=%ae", rev).strip().lower()
+
+
+def harness(root, config):
+    chosen = git(root, "config", "--get", "specloop.harness", check=False).strip() or config["sync"]["harness"]
+    if chosen not in HARNESSES:
+        sys.exit(f"specloop: unknown harness {chosen!r}; use one of {', '.join(HARNESSES)}")
+    return chosen
+
+
 def short(root, rev):
     return git(root, "rev-parse", "--short", rev).strip()
 
@@ -386,8 +543,9 @@ def sync_report(root, config, base):
     """(short sha, state, detail) for each spec revision the code doesn't match
     yet, oldest first, plus any live sync of a revision not on this branch."""
     prefix = config["sync"]["branchPrefix"]
-    revs = git(root, "log", "--format=%H", f"{base}..HEAD", "--", config["spec"]).split()
+    revs = git(root, "log", "--format=%H", f"{base}..HEAD", "--", spec_pathspec(config)).split()
     syncs = load_syncs(root)
+    mine = my_emails(root)
     lines, covered_by = [], None
     # Newest first: a sync implements the whole spec at its revision, so a live
     # one also covers every older pending revision.
@@ -400,6 +558,8 @@ def sync_report(root, config, base):
             state, detail = "awaiting review", f"on {branch}"
         elif covered_by:
             state, detail = "included", f"in the sync of {covered_by}"
+        elif config["sync"]["trigger"] == "mine" and (author := commit_author(root, rev)) not in mine:
+            state, detail = "not started", f"by {author}, so the hook left it to them; run /spec-sync to take it"
         else:
             state, detail = "not started", "run /spec-sync"
         if not covered_by and state in ("starting", "running", "awaiting review"):
@@ -413,17 +573,17 @@ def sync_report(root, config, base):
     return lines
 
 
-def reused_ids(root, config, current_text):
+def reused_ids(root, config, current_docs):
     """(id, commit that removed it, where it came back) for IDs that were
-    removed and later defined again with different rule text."""
-    spec = config["spec"]
-    revs = git(root, "log", "--reverse", "--format=%H", "--", spec).split()
-    snapshots = [(rev[:7], git(root, "show", f"{rev}:{spec}", check=False)) for rev in revs]
-    snapshots.append(("the working tree", current_text))
+    removed and later defined again with different rule text, anywhere in the spec.
+    Moving a rule to another doc isn't a removal."""
+    revs = git(root, "log", "--reverse", "--format=%H", "--", spec_pathspec(config)).split()
+    snapshots = [(rev[:7], spec_docs(root, config, rev)) for rev in revs]
+    snapshots.append(("the working tree", current_docs))
     present, last_text, removed_at, reused = set(), {}, {}, {}
-    for where, text in snapshots:
-        ids = {i for i, _, _ in definitions(text, config)}
-        texts = rule_texts(text, config)
+    for where, docs in snapshots:
+        ids = {i for _, text in docs for i, _, _ in definitions(text, config)}
+        texts = rule_texts(docs, config)
         for spec_id in present - ids:
             removed_at[spec_id] = where
         for spec_id in ids - present:
@@ -441,9 +601,11 @@ def reused_ids(root, config, current_text):
 
 # MARK: worktrees
 #
-# The hook starts each sync with `claude --bg --worktree spec-sync-<sha>`, so
-# Claude Code creates .claude/worktrees/spec-sync-<sha> and locks it with the
-# session's pid. Cleanup only ever touches worktrees with that name.
+# With Claude Code, the hook starts each sync with `claude --bg --worktree
+# spec-sync-<sha>`, so Claude Code creates .claude/worktrees/spec-sync-<sha>
+# and locks it with the session's pid. With Cursor, the hook makes
+# .specloop/worktrees/spec-sync-<sha> itself and locks it the same way.
+# Cleanup only ever touches worktrees with that name.
 
 WORKTREE_NAME = re.compile(r"^spec-sync-([0-9a-f]{4,40})$")
 
@@ -520,12 +682,16 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
     where = os.path.relpath(path, root)
     lock, pid = lock_state(tree)
     session_id = (record or {}).get("sessionId", "")
+    # The hook started a cursor agent itself, so it's ours to stop by pid.
+    # A Claude Code session is stopped through claude.
+    by_cursor = (record or {}).get("harness") == "cursor"
+    with_claude = bool(session_id) and shutil.which("claude")
     if lock == "foreign":
         return False, f"kept {where}: locked ({tree['locked']})"
     if lock == "live":
         if (record or {}).get("status") in ("starting", "running"):
             return False, f"kept {where}: its session is still running"
-        if not session_id or not shutil.which("claude"):
+        if not by_cursor and not with_claude:
             return False, f"kept {where}: a live session (pid {pid}) holds it; stop it from `claude agents`"
     if git(root, "-C", str(path), "status", "--porcelain", check=False).strip():
         return False, f"kept {where}: it has uncommitted changes"
@@ -533,7 +699,13 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
         return True, f"would remove {where} ({why})"
 
     if lock == "live":
-        subprocess.run(["claude", "stop", session_id], capture_output=True)
+        if by_cursor:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            subprocess.run(["claude", "stop", session_id], capture_output=True)
         for _ in range(20):
             if not process_alive(pid):
                 break
@@ -557,7 +729,7 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
             note = f"; deleted {branch}"
         else:
             note = f"; kept {branch}, which has unmerged commits"
-    if session_id and shutil.which("claude"):
+    if with_claude and not by_cursor:
         subprocess.run(["claude", "rm", session_id], capture_output=True)  # its entry in `claude agents`
     if record:
         if why == "implemented":
@@ -586,7 +758,7 @@ def cmd_pending(root, config, args):
         print(f"{config['spec']} is not committed yet.")
         return 0
     if not diff.strip():
-        print(f"Nothing pending: code matches {config['spec']} at {base[:7]}.")
+        print(f"Nothing pending: code matches the spec ({config['spec']}) at {base[:7]}.")
         return 0
     if args.ids:
         print("\n".join(changed_ids(root, config, base)) or "(changed lines sit outside any rule)")
@@ -639,8 +811,8 @@ def cmd_coverage(root, config, args):
 
 
 def cmd_mark(root, config, args):
-    if git(root, "status", "--porcelain", "--", config["spec"]).strip():
-        sys.exit(f"{config['spec']} has uncommitted changes; commit them first.")
+    if git(root, "status", "--porcelain", "--", spec_pathspec(config)).strip():
+        sys.exit(f"The spec ({config['spec']}) has uncommitted changes; commit them first.")
     sha = git(root, "rev-parse", args.rev).strip()
     ledger = root / config["ledger"]
     ledger.parent.mkdir(parents=True, exist_ok=True)
@@ -663,7 +835,7 @@ def cmd_sync(root, config, args):
             sys.exit(f"No sync recorded for {rev[:7]}; give a status to start one.")
         record = record or {"rev": rev, "started": stamp()}
     if not args.status:
-        for key, field in (("note", "note"), ("session", "session"), ("session_id", "sessionId"), ("log", "log")):
+        for key, field in (("note", "note"), ("session", "session"), ("session_id", "sessionId"), ("log", "log"), ("harness", "harness")):
             if getattr(args, key):
                 record[field] = getattr(args, key)
         save_sync(root, record, touch=False)  # a field update isn't news from the session
@@ -681,7 +853,7 @@ def cmd_sync(root, config, args):
         record.pop("finished", None)  # a new attempt at a revision that failed before
     record["status"] = args.status
     record["note"] = args.note or ""
-    for key, field in (("session", "session"), ("session_id", "sessionId"), ("log", "log")):
+    for key, field in (("session", "session"), ("session_id", "sessionId"), ("log", "log"), ("harness", "harness")):
         if getattr(args, key):
             record[field] = getattr(args, key)
     save_sync(root, record)
@@ -691,7 +863,7 @@ def cmd_sync(root, config, args):
 
 def cmd_trigger(root, config, args):
     since = args.since or git(root, "rev-parse", "--verify", "-q", "HEAD^1", check=False).strip() or EMPTY_TREE
-    if not git(root, "diff", "--name-only", since, "HEAD", "--", config["spec"], check=False).strip():
+    if not git(root, "diff", "--name-only", since, "HEAD", "--", spec_pathspec(config), check=False).strip():
         return 1
     base, diff = pending_diff(root, config)
     if not diff.strip():
@@ -705,6 +877,23 @@ def cmd_trigger(root, config, args):
             f"After its branch is merged, run /spec-sync to pick up {short(root, 'HEAD')}."
         )
         return 1
+    if config["sync"]["trigger"] == "mine":
+        # Everyone who pulls a merged spec PR gets the same change. Only its
+        # author's machine builds it, so two people don't build it at once.
+        span = "HEAD" if since == EMPTY_TREE else f"{since}..HEAD"
+        authors = git(root, "log", "--no-merges", "--format=%ae", span, "--", spec_pathspec(config)).lower().split()
+        if authors and not set(authors) & my_emails(root):
+            print(
+                f"specloop: the spec changes here are by {', '.join(sorted(set(authors)))}, so their sync is "
+                f"theirs to start. To take it yourself, run /spec-sync. If one of those addresses is you, "
+                f"`git config --add specloop.email <address>`."
+            )
+            return 1
+    return 0
+
+
+def cmd_harness(root, config, args):
+    print(harness(root, config))
     return 0
 
 
@@ -723,31 +912,33 @@ def cmd_check(root, config, args):
         findings.append((level, message, path, line))
 
     spec = config["spec"]
-    if not (root / spec).exists():
+    docs = spec_docs(root, config)
+    if not docs:
         add("error", f"{spec} doesn't exist. Set `spec` in specloop.json.")
         return report(findings, args)
-    text = (root / spec).read_text()
-    defs = definitions(text, config)
+    for finding in tree_findings(config, docs):
+        add(*finding)
 
     first = {}
-    for spec_id, number, _ in defs:
-        if spec_id in first:
-            add("error", f"{spec_id} is defined more than once (first at line {first[spec_id]}).", spec, number)
-        else:
-            first[spec_id] = number
+    for path, text in docs:
+        for spec_id, number, _ in definitions(text, config):
+            if spec_id in first:
+                where = f"line {first[spec_id][1]}" if first[spec_id][0] == path else f"{first[spec_id][0]}:{first[spec_id][1]}"
+                add("error", f"{spec_id} is defined more than once (first at {where}).", path, number)
+            else:
+                first[spec_id] = (path, number)
 
     if is_shallow(root):
         add("warning", "Shallow clone: skipped the reused-ID check. Fetch full history (actions/checkout: fetch-depth: 0).")
     else:
         allowed = set(config["check"]["allowReused"])
-        for spec_id, removed, back in reused_ids(root, config, text):
+        for spec_id, removed, back in reused_ids(root, config, docs):
             if spec_id not in allowed:
                 add(
                     "error",
                     f"{spec_id} was removed in {removed} and defined again in {back} with different text. "
                     f"IDs are permanent: give the new rule a new number, or list {spec_id} under check.allowReused.",
-                    spec,
-                    first[spec_id],
+                    *first[spec_id],
                 )
 
     claims = test_claims(root, config)
@@ -756,10 +947,10 @@ def cmd_check(root, config, args):
             add("error", f"Test names {spec_id}, which the spec doesn't define (stale tag).", path, number)
 
     prefixes = [p.strip() for p in (args.require or ",".join(config["sync"]["require"])).split(",") if p.strip()]
-    for spec_id, number in first.items():
+    for spec_id, where in first.items():
         prefix = spec_id.split("-")[0]
         if prefix in prefixes and not claims.get(spec_id):
-            add("error", f"{spec_id} has no test, and every {prefix} rule is required to have one.", spec, number)
+            add("error", f"{spec_id} has no test, and every {prefix} rule is required to have one.", *where)
 
     rev = ledger_rev(root, config)
     if rev and not commit_exists(root, rev):
@@ -768,14 +959,14 @@ def cmd_check(root, config, args):
         if not rev:
             add("warning", f"No {config['ledger']} yet; treating the commit that added the spec as implemented.")
         base = baseline(root, config)
-        if base and git(root, "diff", base, "HEAD", "--", spec).strip():
+        if base and git(root, "diff", base, "HEAD", "--", spec_pathspec(config)).strip():
             ids = changed_ids(root, config, base)
             add(
                 "warning" if args.allow_pending else "error",
                 f"The spec changed after the implemented revision {base[:7]}"
                 + (f" ({', '.join(ids)})" if ids else "")
                 + " and the code hasn't caught up. Run /spec-sync, or merge its spec-sync branch.",
-                spec,
+                spec_root(config),
             )
     return report(findings, args)
 
@@ -798,7 +989,8 @@ def cmd_status(root, config, args):
     base, diff = pending_diff(root, config)
     claims = test_claims(root, config)
     defined = {i for i, _ in spec_ids(root, config)}
-    print(f"spec:        {config['spec']}")
+    docs = len(spec_docs(root, config))
+    print(f"spec:        {config['spec']}" + (f" ({docs} doc{'s' * (docs != 1)})" if is_tree(config) else ""))
     print(f"implemented: {base[:7] if base else '(spec not committed)'}")
     print(f"pending:     {(', '.join(changed_ids(root, config, base)) or 'changes outside any rule') if diff.strip() else 'nothing'}")
     if diff.strip():
@@ -837,11 +1029,13 @@ def main():
     p.add_argument("--session", help="Claude Code session name")
     p.add_argument("--session-id", help="Claude Code session ID, for `claude logs`")
     p.add_argument("--log", help="where the launch output went")
+    p.add_argument("--harness", choices=HARNESSES, help="which coding agent runs the sync")
     p = sub.add_parser("cleanup")
     p.add_argument("--dry-run", action="store_true", help="say what would be removed")
     p.add_argument("--quiet", action="store_true", help="only report removals")
     p = sub.add_parser("trigger")
     p.add_argument("--since", help="revision before this update (default: HEAD's first parent)")
+    sub.add_parser("harness")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")
     args = parser.parse_args()
@@ -857,6 +1051,7 @@ def main():
         "sync": cmd_sync,
         "trigger": cmd_trigger,
         "cleanup": cmd_cleanup,
+        "harness": cmd_harness,
         "config": cmd_config,
     }[args.command]
     return handler(root, config, args)

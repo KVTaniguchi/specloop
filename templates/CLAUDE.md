@@ -1,7 +1,9 @@
 ## Spec-driven development (specloop)
 
-- **`docs/SPEC.md` is the source of truth** for what this project does. Read it before changing behavior.
-- Committing, merging or pulling a change to the spec starts `/spec-sync` as a background session in its own worktree (`tools/githooks/`). Enable it per clone with `git config core.hooksPath tools/githooks`. To skip it once, use `SPEC_SYNC=off`. `tools/specloop status` shows where each pending spec revision stands.
+<!-- Paste this into CLAUDE.md for Claude Code, AGENTS.md for Cursor, or both. -->
+
+- **The spec in `docs/spec/` is the source of truth** for what this project does. `docs/spec/README.md` is the overview and links to one doc per feature. Read the overview and the relevant feature docs before changing behavior.
+- **Behavior changes start as spec changes**, normally a pull request against `docs/spec/`. Once it's merged and pulled, the specloop hook starts `/spec-sync` as a background session in its own worktree, on the machine of the person who wrote the spec change. Enable it per clone with `git config core.hooksPath tools/githooks`, and pick your agent with `git config specloop.harness claude` (or `cursor`). To skip it once, use `SPEC_SYNC=off`. `tools/specloop status` shows where each pending spec revision stands.
 - `docs/.spec-implemented` holds the commit whose spec the code matches. Only `/spec-sync` advances it, or `tools/specloop mark` after a hand-made spec+code commit.
 - Tests name the spec IDs they check at the start of their name, e.g. `@Test("XP-6: …")`. `tools/specloop coverage` reports which IDs have tests and fails on IDs the spec doesn't define.
 - Any direct code change that alters behavior must update the spec in the same commit.

@@ -2,8 +2,9 @@
 #
 # Install specloop into a project:  ./install.sh /path/to/project
 #
-# Copies the CLI, git hooks and Claude Code skills, and adds a config and spec
-# template if the project doesn't have them yet. Never overwrites an
+# Copies the CLI, git hooks and skills (in .claude/skills/, which both Claude
+# Code and Cursor read), and adds a config and a spec tree template if the
+# project doesn't have them yet. Never overwrites an
 # existing spec or config. Enabling the hook (core.hooksPath) is left to you,
 # because it replaces any hooks already in .git/hooks.
 
@@ -27,12 +28,20 @@ cp "$here/skills/spec-sync/SKILL.md" "$target/.claude/skills/spec-sync/SKILL.md"
 cp "$here/skills/spec-init/SKILL.md" "$target/.claude/skills/spec-init/SKILL.md"
 
 [ -e "$target/specloop.json" ] || cp "$here/templates/specloop.json" "$target/specloop.json"
-[ -e "$target/docs/SPEC.md" ] || cp "$here/templates/SPEC.md" "$target/docs/SPEC.md"
+spec=$(cd "$target" && tools/specloop config spec)
+case "$spec" in
+    *.md) [ -e "$target/$spec" ] || echo "note: $spec doesn't exist yet; /spec-init will draft it" ;;
+    *) if [ ! -e "$target/$spec" ]; then
+           mkdir -p "$target/$spec"
+           cp "$here/templates/spec/README.md" "$here/templates/spec/feature.md" "$target/$spec/"
+       fi ;;
+esac
 
 echo "specloop installed into $target"
 echo
 echo "Next:"
 echo "  1. Edit specloop.json (test command, test paths)."
-echo "  2. Paste templates/CLAUDE.md into the project's CLAUDE.md."
-echo "  3. Run /spec-init in Claude Code to draft the spec from the code."
+echo "  2. Paste templates/CLAUDE.md into the project's CLAUDE.md (Claude Code) or AGENTS.md (Cursor)."
+echo "  3. Run /spec-init in Claude Code or Cursor to draft the spec from the code."
 echo "  4. Enable the trigger:  git -C \"$target\" config core.hooksPath tools/githooks"
+echo "     Using Cursor?        git -C \"$target\" config specloop.harness cursor"
