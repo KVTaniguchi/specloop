@@ -510,6 +510,14 @@ def ago(iso):
     return f"{int(minutes // (24 * 60))}d ago"
 
 
+def in_linked_worktree(root):
+    def resolved(flag):
+        path = Path(git(root, "rev-parse", flag).strip())
+        return (path if path.is_absolute() else root / path).resolve()
+
+    return resolved("--git-dir") != resolved("--git-common-dir")
+
+
 def state_dir(root):
     common = Path(git(root, "rev-parse", "--git-common-dir").strip())
     return (common if common.is_absolute() else root / common) / "specloop"
@@ -616,6 +624,19 @@ def sync_report(root, config, base):
     syncs = load_syncs(root)
     mine = my_emails(root)
     lines, covered_by = [], None
+    live = ("starting", "running", "awaiting review")
+    # A sync records the commit it started from, which can be a later one that
+    # didn't touch the spec. It still builds every pending revision before it.
+    later = sorted(
+        (r for rev, r in syncs.items() if revs and rev not in revs and commit_exists(root, rev)
+         and succeeds(root, "merge-base", "--is-ancestor", revs[0], rev)),
+        key=lambda r: r.get("updated", ""), reverse=True,
+    )
+    for record in later:
+        state, detail = describe_sync(root, config, record, record.get("branch") or f"{prefix}{short(root, record['rev'])}")
+        if not covered_by and state in live:
+            covered_by = short(root, record["rev"])
+        lines.append((short(root, record["rev"]), state, f"{detail} (builds {short(root, revs[0])})"))
     # Newest first: a sync implements the whole spec at its revision, so a live
     # one also covers every older pending revision.
     for rev in revs:
@@ -623,6 +644,8 @@ def sync_report(root, config, base):
         branch = (record or {}).get("branch") or f"{prefix}{short(root, rev)}"
         if record:
             state, detail = describe_sync(root, config, record, branch)
+            if covered_by and state not in live:
+                state, detail = "included", f"in the sync of {covered_by}"
         elif branch_exists(root, branch):
             state, detail = "awaiting review", f"on {branch}"
         elif covered_by:
@@ -631,12 +654,12 @@ def sync_report(root, config, base):
             state, detail = "not started", f"by {author}, so the hook left it to them; run /spec-sync to take it"
         else:
             state, detail = "not started", "run /spec-sync"
-        if not covered_by and state in ("starting", "running", "awaiting review"):
+        if not covered_by and state in live:
             covered_by = short(root, rev)
         lines.append((short(root, rev), state, detail))
     lines.reverse()
     for rev, record in syncs.items():
-        if rev not in revs and is_active(record, config) and commit_exists(root, rev):
+        if rev not in revs and record not in later and is_active(record, config) and commit_exists(root, rev):
             state, detail = describe_sync(root, config, record, record.get("branch", ""))
             lines.append((short(root, rev), state, f"{detail} (revision not on this branch)"))
     return lines
@@ -1087,9 +1110,10 @@ def sync_counts(root, config):
 
 # MARK: worktrees
 #
-# With Claude Code, the hook starts each sync with `claude --bg --worktree
-# spec-sync-<sha>`, so Claude Code creates .claude/worktrees/spec-sync-<sha>
-# and locks it with the session's pid. With Cursor, the hook makes
+# With Claude Code, the hook makes .claude/worktrees/spec-sync-<sha> at HEAD
+# and starts `claude --bg` inside it. Nothing locks it, so a dead session is
+# found by the sync going quiet. (`claude --worktree` would cut the worktree
+# from the remote's default branch instead.) With Cursor, the hook makes
 # .specloop/worktrees/spec-sync-<sha> itself and locks it the same way.
 # Cleanup only ever touches worktrees with that name.
 
@@ -1184,6 +1208,10 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
     if dry_run:
         return True, f"would remove {where} ({why})"
 
+    if lock == "unlocked" and with_claude and not by_cursor:
+        # The hook made this worktree, so nothing holds a lock on it; ask
+        # Claude Code to stop the session that ran in it.
+        subprocess.run(["claude", "stop", session_id], capture_output=True)
     if lock == "live":
         if by_cursor:
             try:
@@ -1317,6 +1345,11 @@ def cmd_sync(root, config, args):
     if record is None:
         rev = git(root, "rev-parse", args.rev or "HEAD").strip()
         record = syncs.get(rev)
+        if record is None and not args.rev and args.status in ("done", "blocked", "failed"):
+            # A session that stops before `sync running`, say because it found
+            # nothing to build, reports on the launch that started it.
+            launches = [r for r in syncs.values() if r.get("status") == "starting"]
+            record = max(launches, key=lambda r: r.get("updated", ""), default=None)
         if record is None and not args.status:
             sys.exit(f"No sync recorded for {rev[:7]}; give a status to start one.")
         record = record or {"rev": rev, "started": stamp()}
@@ -1389,6 +1422,12 @@ def record_sync_signal(root, config, record, args):
 def cmd_trigger(root, config, args):
     since = args.since or git(root, "rev-parse", "--verify", "-q", "HEAD^1", check=False).strip() or EMPTY_TREE
     if not git(root, "diff", "--name-only", since, "HEAD", "--", spec_pathspec(config), check=False).strip():
+        return 1
+    if in_linked_worktree(root):
+        # A sync's worktree, or a session's, that merged in a spec change to
+        # work on it. Syncs start from the main work tree, where the change
+        # arrives for real; starting one here builds it a second time.
+        print("specloop: this is a linked worktree, so the hook won't start a sync here. Syncs start from the main work tree.")
         return 1
     base, diff = pending_diff(root, config)
     if not diff.strip():

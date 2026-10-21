@@ -18,7 +18,11 @@ tools/specloop pending         # the spec diff since the implemented revision
 tools/specloop pending --ids   # the rule IDs on changed lines
 ```
 
-- If nothing is pending, report that the spec and the code already match, and stop.
+- If nothing is pending, report that the spec and the code already match, and stop. **If the hook started you** (your prompt says so), record why before you stop, so `status` shows it instead of a launch that never reported in:
+  ```bash
+  tools/specloop sync failed --note "nothing pending at $(git rev-parse --short HEAD)"
+  ```
+  The hook only starts a sync when something is pending, so this usually means the worktree doesn't have the spec change. Say which commit you're on in the report.
 - If the spec has uncommitted edits, stop and ask the user to commit them first. A sync only works from committed spec revisions.
 - Check the feedback on those rules: `tools/specloop signals --pending` lists open signals (crashes, QA reports, review comments, earlier syncs that stopped) traced to the rules this sync touches. Read each with `tools/specloop signal show <id>`. A spec change is often the fix for one of them, so the code and tests you write should make it go away. Note which ones you address.
 - Read more than the diff. For a single file, read all of it. For a tree, read the overview, every doc the diff touches, and the docs those link to. A change in one feature often affects rules in another.
@@ -27,7 +31,7 @@ tools/specloop pending --ids   # the rule IDs on changed lines
 
 Read the prefix with `tools/specloop config sync.branchPrefix` (default `spec-sync/`).
 - If you're on the default branch, create `<prefix><short-sha-of-HEAD>`.
-- If you're already on that branch (the hook makes it for Cursor), stay on it.
+- If you're already on that branch (the hook makes it), stay on it.
 - If the hook started you in a worktree on some other branch, rename that branch to the same name with `git branch -m`.
 
 Then record that the sync is underway, so `tools/specloop status` can show it and the hook won't start a second one:

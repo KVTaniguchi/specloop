@@ -6,6 +6,11 @@ What happened when specloop was applied to a real project, the fix or open quest
 
 ---
 
+### 2026-10-21 — A sync started from `origin/main`, without the spec change (the app)
+The app's ACH-1 spec commit was committed but not pushed. The hook started `claude --bg --worktree spec-sync-<sha>`, and Claude Code cut that worktree from `origin/main`, three commits behind. The session found nothing pending, stopped, and never ran `specloop sync`, so `status` said `failed to start?` for five hours. A second sync, started by hand in its own worktree, had the same problem. It merged local `main` in to get the spec change, and that merge fired the post-merge hook, which started a third, duplicate sync, also from `origin/main`. Then `status` kept showing ACH-1 as failed, because the sync that did build it had recorded itself under a later commit that didn't touch the spec.
+**Tool change:** the hook now makes the Claude Code worktree at `HEAD` itself and starts `claude --bg` inside it. The trigger never starts a sync from a linked worktree. `/spec-sync` records `sync failed` when the hook started it and nothing is pending, which reports on the launch record. `status` credits a sync of a later commit to the pending revisions it builds.
+**Cost:** Claude Code no longer locks the worktree with the session's pid, so a dead session is noticed when the sync goes quiet (10 minutes for a launch, `sync.staleAfterMinutes` once running) instead of at once.
+
 ### 2026-10-21 — A spec rule that quoted config values went stale (the app)
 The app's REL-4 said coverage fails "if a BREED or LVL rule has no test", which copied the `sync.require` list from `specloop.json`. Once tier 2 landed and XP and ACH were added to that list, the rule was wrong. Nothing caught it, because `specloop check` validates IDs and tags, not whether the spec's prose matches the config.
 **Fix:** the rule now points at the config ("a rule with one of the prefixes listed under `sync.require`") instead of copying its values.

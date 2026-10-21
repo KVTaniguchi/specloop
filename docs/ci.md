@@ -12,11 +12,12 @@ The hooks in `tools/githooks/` run after every way a spec change can reach a clo
 | `post-merge` | `git merge` and `git pull`, fast-forward or not (not `--squash`: its commit fires `post-commit`) | `ORIG_HEAD..HEAD` |
 | `post-rewrite` | a rebase, including `git pull --rebase` (not `--amend`: `post-commit` already ran) | `ORIG_HEAD..HEAD` |
 
-Each one calls `tools/specloop trigger`, which starts a sync only when all three are true:
+Each one calls `tools/specloop trigger`, which starts a sync only when all of these are true:
 1. the update changed the spec,
 2. the code doesn't match the spec at `HEAD` yet (a pull of an already-synced change starts nothing), and
-3. no other sync is starting or running in this clone, and
-4. you wrote the spec change (with `sync.trigger` at its default, `mine`).
+3. no other sync is starting or running in this clone,
+4. you wrote the spec change, and
+5. it happened in the main work tree. A merge in a sync's worktree, or in any other linked worktree, never starts one: the change starts its sync when it reaches the main work tree. (with `sync.trigger` at its default, `mine`).
 
 The fourth one is how specloop avoids collisions without a server. A spec PR merged on GitHub reaches everyone who pulls, and every clone with the hook enabled would otherwise start building it. Instead, only the clone whose `user.email` (or any `git config specloop.email`) matches the author of a spec commit in the update starts a sync. Everyone else sees the revision in `status` as `not started  by <author>, so the hook left it to them`, and can take it over with `/spec-sync`. Set `"trigger": "all"` under `sync` if you work alone across addresses or want every clone to build.
 
@@ -50,7 +51,7 @@ A launch that went quiet (`failed to start?`, `stalled?`) no longer stops the ho
 
 ## Cleaning up worktrees
 
-Each sync runs in a worktree locked with its agent's pid: `.claude/worktrees/spec-sync-<sha>`, which Claude Code creates, or `.specloop/worktrees/spec-sync-<sha>`, which the hook creates for Cursor. Neither agent removes it when it finishes. While a sync waits for review, its branch is checked out there, so you can `cd` into it to run the change, or `claude attach` to the session to ask about it.
+Each sync runs in a worktree the hook makes at `HEAD`, on the branch `spec-sync/<sha>`: `.claude/worktrees/spec-sync-<sha>` for Claude Code, `.specloop/worktrees/spec-sync-<sha>` for Cursor. The hook makes it itself because `claude --worktree` would cut it from the remote's default branch, which doesn't have a spec change you haven't pushed. A Cursor worktree is locked with its agent's pid. A Claude Code one isn't locked, because `claude --bg` doesn't say which process runs the session, so a dead Claude Code session shows up as a sync that went quiet (`failed to start?`, `stalled?`). Neither agent removes its worktree when it finishes. While a sync waits for review, its branch is checked out there, so you can `cd` into it to run the change, or `claude attach` to the session to ask about it.
 
 `tools/specloop cleanup` removes these worktrees once they're no longer needed, and the hooks run it after every commit, merge and rebase. A worktree goes when either:
 - **the sync is implemented:** the ledger has reached its revision, usually because you merged its branch. Its session is stopped first if it's still open.
@@ -62,7 +63,7 @@ It never touches:
 - a worktree with uncommitted changes
 - a worktree locked by anything other than a sync's agent
 
-The branch is deleted when it's merged or has no commits of its own. Otherwise it's kept and the message says so. A squash-merged branch is one example. For Claude Code, `claude rm` then clears the session from `claude agents`. A Cursor agent that's still open is stopped by its pid.
+The branch is deleted when it's merged or has no commits of its own. Otherwise it's kept and the message says so. A squash-merged branch is one example. For Claude Code, `claude stop` ends the session first and `claude rm` then clears it from `claude agents`. A Cursor agent that's still open is stopped by its pid.
 
 `status` reports leftover worktrees, and `cleanup --dry-run` shows what would go. `SPEC_SYNC=dry-run` also makes the hooks dry-run their cleanup.
 

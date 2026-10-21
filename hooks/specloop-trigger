@@ -133,12 +133,22 @@ if claude auth status 2>/dev/null | grep -q '"loggedIn": *false'; then
     exit 0
 fi
 
+# `claude --worktree` cuts its worktree from the remote's default branch, which
+# doesn't have a spec change that's only been committed here. So the hook makes
+# the worktree at HEAD, where Claude Code would have put it, and starts the
+# session inside it.
+tree="$root/.claude/worktrees/spec-sync-$short"
+branch="$prefix$short"
 "$specloop" sync starting --session "$session" --log "$log" >/dev/null
-if claude --bg \
-    --worktree "spec-sync-$short" \
+if ! out=$(git worktree add -q -b "$branch" "$tree" HEAD 2>&1); then
+    "$specloop" sync failed --rev HEAD --note "couldn't make the worktree: $out" >/dev/null
+    echo "specloop: couldn't make the worktree ($out) — run /spec-sync manually for $short"
+    exit 0
+fi
+if (cd "$tree" && exec claude --bg \
     --name "$session" \
     --permission-mode "$permission" \
-    "/spec-sync" >"$log" 2>&1; then
+    "/spec-sync started by the specloop hook, in a worktree already on the branch $branch") >"$log" 2>&1; then
     # --bg picks the session ID and prints it ("backgrounded · 9c694670 · …").
     # Record it without touching the status, which the session may have set by now.
     id=$(grep -o 'backgrounded[^0-9a-f]*[0-9a-f]\{8\}' "$log" | grep -o '[0-9a-f]\{8\}$' | head -n 1)

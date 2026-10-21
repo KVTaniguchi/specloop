@@ -74,6 +74,7 @@ class Repo:
         self.calls = path.parent / "claude-calls"
         self.agent_calls = path.parent / "agent-calls"
         self.launch_env = path.parent / "launch-env"
+        self.launch_cwd = path.parent / "launch-cwd"
         self.session_pid = path.parent / "session-pid"
         bin_dir = path.parent / "bin"
         bin_dir.mkdir()
@@ -90,6 +91,7 @@ class Repo:
             f'if [ "$1" = stop ]; then [ -f "{self.session_pid}" ] && kill "$(cat "{self.session_pid}")"; exit 0; fi\n'
             'if [ "$1" = rm ]; then exit 0; fi\n'
             f"env | grep '^GIT_' >> \"{self.launch_env}\"\n"
+            f'echo "$PWD" >> "{self.launch_cwd}"\n'
             f"{launch}exit {claude_exit}\n"
         )
         fake.chmod(0o755)
@@ -451,6 +453,7 @@ class CleanupTests(SpecloopTestCase):
         repo.enable_hooks()
         out = repo.git("merge", "-q", f"spec-sync/{short}").output
         self.assertIn(f"removed .claude/worktrees/spec-sync-{short} (implemented; deleted spec-sync/{short})", out)
+        self.assertIn("stop abc12345", repo.claude_calls(), "an unlocked worktree's session is stopped by id")
         self.assertFalse(path.exists())
         self.assertNotIn(f"spec-sync/{short}", repo.branches())
         self.assertEqual(repo.syncs(), [])
@@ -558,7 +561,12 @@ class HookTests(SpecloopTestCase):
         out = repo.commit("raise scan XP").output
         self.assertIn("started background session", out)
         self.assertEqual(len(repo.claude_calls()), 1)
-        self.assertIn("--worktree spec-sync-", repo.claude_calls()[0])
+        self.assertNotIn("--worktree", repo.claude_calls()[0])
+        short = repo.git("rev-parse", "--short", "HEAD").stdout.strip()
+        tree = (repo.path / ".claude" / "worktrees" / f"spec-sync-{short}").resolve()
+        self.assertEqual(Path(repo.launch_cwd.read_text().strip()).resolve(), tree)
+        self.assertEqual(repo.git("-C", str(tree), "rev-parse", "HEAD").stdout, repo.git("rev-parse", "HEAD").stdout)
+        self.assertEqual(repo.git("-C", str(tree), "branch", "--show-current").stdout.strip(), f"spec-sync/{short}")
         [record] = repo.syncs()
         self.assertEqual(record["status"], "starting")
         self.assertEqual(record["sessionId"], "9c694670")
@@ -1171,6 +1179,48 @@ class FeedbackLoopTests(SpecloopTestCase):
         repo.run_in(path, "sync", "failed", "--note", "XP-1 test keeps failing", "--signal")
         [record] = [json.loads(p.read_text()) for p in (repo.path / "docs" / "signals").glob("*.json")]
         self.assertIsNone(record["triage"])
+
+
+class SyncStartTests(SpecloopTestCase):
+    def test_no_trigger_from_a_linked_worktree(self):
+        repo = self.repo()
+        repo.enable_hooks()
+        path = repo.path.parent / "session-tree"
+        repo.git("worktree", "add", "-q", "-b", "session", str(path))
+        (path / "docs" / "SPEC.md").write_text(SPEC.replace("10 XP", "12 XP"))
+        repo.git("-C", str(path), "add", "-A")
+        out = repo.git("-C", str(path), "commit", "-q", "-m", "raise scan XP").output
+        self.assertIn("linked worktree, so the hook won't start a sync here", out)
+        self.assertEqual(repo.claude_calls(), [])
+        repo.git("merge", "-q", "session")
+        self.assertEqual(len(repo.claude_calls()), 1, "it starts once the change reaches the main work tree")
+
+    def test_stopping_before_running_reports_on_the_launch(self):
+        repo = self.repo()
+        rev = repo.spec_change()
+        repo.run("sync", "starting", "--session", "Spec sync x")
+        path = repo.path.parent / "stale-tree"
+        repo.git("worktree", "add", "-q", "-b", "elsewhere", str(path), "HEAD~1")
+        repo.run_in(path, "sync", "failed", "--note", "nothing pending at abc1234")
+        [record] = repo.syncs()
+        self.assertEqual((record["rev"], record["status"]), (rev, "failed"))
+        self.assertIn("failed           nothing pending at abc1234", repo.run("status").stdout)
+
+    def test_sync_of_a_later_commit_covers_the_pending_one(self):
+        repo = self.repo()
+        pending = repo.spec_change()
+        repo.run("sync", "starting")
+        repo.run("sync", "failed", "--rev", pending, "--note", "never reported in")
+        repo.write("NOTES.md", "later\n")
+        repo.commit("unrelated")
+        later = repo.git("rev-parse", "--short", "HEAD").stdout.strip()
+        repo.git("checkout", "-q", "-b", f"spec-sync/{later}")
+        repo.run("sync", "running")
+        repo.git("checkout", "-q", "main")
+        status = repo.run("status").stdout
+        self.assertRegex(status, rf"{pending[:7]}\s+included\s+in the sync of {later}")
+        self.assertRegex(status, rf"{later}\s+running\s+on spec-sync/{later}, last update .* \(builds {pending[:7]}\)")
+        self.assertNotIn("revision not on this branch", status)
 
 
 if __name__ == "__main__":
