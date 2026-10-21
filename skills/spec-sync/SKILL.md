@@ -5,7 +5,9 @@ description: Implement the pending changes in the project's spec (specloop). Use
 
 # Spec sync
 
-The spec (path in `specloop.json`, usually `docs/SPEC.md`) is the source of truth for what this project does. The ledger file records the commit whose spec the code currently matches. Your job is to make the code match the spec at `HEAD`, then advance the ledger.
+The spec is the source of truth for what this project does. Its path is in `specloop.json`. It's either one Markdown file, or a directory of them: a `README.md` overview at the top that links to one doc per feature. The ledger file records the commit whose spec the code currently matches. Your job is to make the code match the spec at `HEAD`, then advance the ledger.
+
+This skill works the same in Claude Code and in Cursor. Where it says `CLAUDE.md`, read `AGENTS.md` too if the project has one.
 
 `tools/specloop` does the bookkeeping. Run `tools/specloop --help` if you need details.
 
@@ -18,12 +20,13 @@ tools/specloop pending --ids   # the rule IDs on changed lines
 
 - If nothing is pending, report that the spec and the code already match, and stop.
 - If the spec has uncommitted edits, stop and ask the user to commit them first. A sync only works from committed spec revisions.
-- Read the **whole** spec, not just the diff. A change in one section often affects rules in other sections.
+- Read more than the diff. For a single file, read all of it. For a tree, read the overview, every doc the diff touches, and the docs those link to. A change in one feature often affects rules in another.
 
 ## 2. Branch
 
 Read the prefix with `tools/specloop config sync.branchPrefix` (default `spec-sync/`).
 - If you're on the default branch, create `<prefix><short-sha-of-HEAD>`.
+- If you're already on that branch (the hook makes it for Cursor), stay on it.
 - If the hook started you in a worktree on some other branch, rename that branch to the same name with `git branch -m`.
 
 Then record that the sync is underway, so `tools/specloop status` can show it and the hook won't start a second one:
@@ -35,7 +38,7 @@ tools/specloop sync running
 ## 3. Plan, then build
 
 - Turn each diff hunk into concrete code changes, and name the rule IDs you're addressing.
-- **Never edit the spec.** If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Run `tools/specloop sync blocked --note "<the question, one line>"` and put the question in your report instead of guessing.
+- **Never edit the spec**, in any of its docs. If a change is ambiguous, contradicts another rule, or breaks the spec's own non-goals, stop. Run `tools/specloop sync blocked --note "<the question, one line>"` and put the question in your report instead of guessing.
 - Follow the project's existing conventions (see `CLAUDE.md`). If `CLAUDE.md` has a **Spec sync rules** section, those rules apply on top of this skill. That's where project-specific checks go, such as evaluation numbers for model thresholds or store copy to keep in step.
 - Every rule you add or change gets a test. Tag the test with the rule IDs at the start of its name, before the first colon: `@Test("XP-6: …")`, `it("XP-6: …")`, `@pytest.mark.spec("XP-6")`, or a `// Spec: XP-6` comment above the test.
 - If the diff renames or removes an ID, update the tests that name it.
@@ -74,6 +77,7 @@ Always record one of `done`, `blocked` or `failed` before you finish. Otherwise 
 
 Keep it short:
 - the branch to review, and that it's checked out in this worktree (`git rev-parse --show-toplevel`) if the hook started you. The worktree is removed automatically once the branch is merged.
+- to share it as a pull request, the user pushes the branch; you don't
 - what changed, by rule ID
 - test and coverage results
 - anything you couldn't verify

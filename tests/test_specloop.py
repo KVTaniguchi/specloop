@@ -36,10 +36,41 @@ def test_relabel(): pass
 """
 
 
+OVERVIEW = """\
+# Spec
+
+Features: [XP](xp.md), [Levels](levels/).
+
+- **REL-1:** Tests name the IDs they check.
+"""
+
+XP_DOC = """\
+# XP
+
+Part of the [spec](README.md).
+
+- **XP-1:** A scan pays 10 XP.
+- **XP-2:** A relabel pays the scanner's XP.
+"""
+
+LEVELS_DOC = """\
+# Levels
+
+- **LVL-1:** Level n takes 50 XP per level.
+"""
+
+TREE_TESTS = TESTS + """
+# Spec: REL-1, LVL-1
+def test_levels(): pass
+"""
+
+
 class Repo:
-    def __init__(self, path, claude_exit=0, logged_in=True):
+    def __init__(self, path, claude_exit=0, logged_in=True, tree=False, agent_exit=0):
         self.path = path
+        self.tree = tree
         self.calls = path.parent / "claude-calls"
+        self.agent_calls = path.parent / "agent-calls"
         self.launch_env = path.parent / "launch-env"
         self.session_pid = path.parent / "session-pid"
         bin_dir = path.parent / "bin"
@@ -60,6 +91,14 @@ class Repo:
             f"{launch}exit {claude_exit}\n"
         )
         fake.chmod(0o755)
+        # Cursor's agent CLI: a real sync takes minutes, so the fake stays up a while.
+        agent = bin_dir / "agent"
+        agent.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s\\n" "--- run" "$PWD" "$@" >> "{self.agent_calls}"\n'
+            + ("exec sleep 5\n" if agent_exit == 0 else "echo 'Authentication required. Run agent login.'\nexit 1\n")
+        )
+        agent.chmod(0o755)
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
         self.env.pop("SPEC_SYNC", None)
 
@@ -72,9 +111,17 @@ class Repo:
         shutil.copy(HERE / "bin" / "specloop", path / "tools" / "specloop")
         for hook in ("specloop-trigger", "post-commit", "post-merge", "post-rewrite"):
             shutil.copy(HERE / "hooks" / hook, path / "tools" / "githooks" / hook)
-        self.write("specloop.json", json.dumps({"tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}))
-        self.write("docs/SPEC.md", SPEC)
-        self.write("tests/test_rules.py", TESTS)
+        config = {"tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}
+        if tree:
+            config["spec"] = "docs/spec"
+            self.write("docs/spec/README.md", OVERVIEW)
+            self.write("docs/spec/xp.md", XP_DOC)
+            self.write("docs/spec/levels/README.md", LEVELS_DOC)
+            self.write("tests/test_rules.py", TREE_TESTS)
+        else:
+            self.write("docs/SPEC.md", SPEC)
+            self.write("tests/test_rules.py", TESTS)
+        self.write("specloop.json", json.dumps(config))
         self.commit("baseline", SPEC_SYNC="off")
         self.run("mark")
         self.commit("ledger")
@@ -121,9 +168,30 @@ class Repo:
 
     def spec_change(self):
         """Commit a spec change without launching anything; returns its sha."""
-        self.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
+        self.change_spec()
         self.commit("raise scan XP", SPEC_SYNC="off")
         return self.git("rev-parse", "HEAD").stdout.strip()
+
+    def change_spec(self, xp="12 XP"):
+        if self.tree:
+            self.write("docs/spec/xp.md", XP_DOC.replace("10 XP", xp))
+        else:
+            self.write("docs/SPEC.md", SPEC.replace("10 XP", xp))
+
+    def commit_as(self, name, email, message):
+        """A commit by someone else, as a merged PR of theirs arrives."""
+        self.git("add", "-A")
+        return self.git(
+            "commit", "-q", "-m", message,
+            GIT_AUTHOR_NAME=name, GIT_AUTHOR_EMAIL=email, GIT_COMMITTER_NAME=name, GIT_COMMITTER_EMAIL=email,
+        )
+
+    def agent_runs(self):
+        """Each launch of the fake agent: [cwd, *args]."""
+        if not self.agent_calls.exists():
+            return []
+        runs = self.agent_calls.read_text().split("--- run\n")[1:]
+        return [run.splitlines() for run in runs]
 
     def finished_sync(self, rev, session_id="abc12345", lock_pid=None):
         """A sync that built `rev` on its own branch and reported done."""
@@ -576,6 +644,193 @@ class HookTests(SpecloopTestCase):
         repo.write("docs/SPEC.md", SPEC.replace("10 XP", "12 XP"))
         repo.commit("raise scan XP")
         self.assertEqual(repo.claude_calls(), [])
+
+
+class TreeTests(SpecloopTestCase):
+    def test_clean_tree_passes(self):
+        repo = self.repo(tree=True)
+        result = repo.run("check")
+        self.assertEqual(result.returncode, 0, result.output)
+        status = repo.run("status").stdout
+        self.assertIn("spec:        docs/spec (3 docs)", status)
+        self.assertIn("coverage:    4/4 IDs", status)
+
+    def test_coverage_names_the_doc(self):
+        out = self.repo(tree=True).run("coverage").stdout
+        self.assertLess(out.index("README.md"), out.index("levels/README.md · Levels"))
+        self.assertIn("xp.md · XP\n  ✓ XP-1", out)
+
+    def test_change_in_a_feature_doc_is_pending_and_triggers(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/xp.md", XP_DOC.replace("10 XP", "12 XP"))
+        repo.commit("raise scan XP")
+        self.assertEqual(repo.run("trigger").returncode, 0)
+        self.assertEqual(repo.run("pending", "--ids").stdout.split(), ["XP-1"])
+        self.assertIn("docs/spec/xp.md", repo.run("pending").stdout)
+        self.assertIn("(XP-1) and the code hasn't caught up", repo.run("check").output)
+
+    def test_new_feature_doc_is_pending(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/README.md", OVERVIEW.replace("[Levels](levels/)", "[Levels](levels/), [Shop](shop.md)"))
+        repo.write("docs/spec/shop.md", "# Shop\n\n- **SHOP-1:** Items cost coins.\n")
+        repo.commit("add the shop")
+        self.assertEqual(repo.run("pending", "--ids").stdout.split(), ["SHOP-1"])
+
+    def test_id_defined_in_two_docs_fails(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/levels/README.md", LEVELS_DOC + "- **XP-1:** Also something else.\n")
+        result = repo.run("check")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("docs/spec/xp.md:5: XP-1 is defined more than once (first at docs/spec/levels/README.md:4)", result.output)
+
+    def test_moving_a_rule_between_docs_is_not_a_reuse(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/xp.md", XP_DOC.replace("- **XP-2:** A relabel pays the scanner's XP.\n", ""))
+        repo.write("docs/spec/levels/README.md", LEVELS_DOC + "- **XP-2:** A relabel pays the scanner's XP.\n")
+        repo.commit("move XP-2", SPEC_SYNC="off")
+        result = repo.run("check", "--allow-pending")
+        self.assertEqual(result.returncode, 0, result.output)
+
+    def test_broken_link_fails(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/README.md", OVERVIEW.replace("(xp.md)", "(experience.md)"))
+        result = repo.run("check")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("docs/spec/README.md:3: Links to docs/spec/experience.md, which doesn't exist.", result.output)
+        self.assertIn("docs/spec/xp.md:1: Nothing links to docs/spec/xp.md", result.output)
+
+    def test_unlinked_doc_fails(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/shop.md", "# Shop\n")
+        result = repo.run("check")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Nothing links to docs/spec/shop.md", result.output)
+
+    def test_web_links_and_anchors_are_ignored(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/README.md", OVERVIEW + "\nSee [the site](https://example.com/a.md), [rules](#rules), [code](../../app.py).\n")
+        self.assertEqual(repo.run("check").returncode, 0, repo.run("check").output)
+
+    def test_missing_overview_fails(self):
+        repo = self.repo(tree=True)
+        (repo.path / "docs/spec/README.md").unlink()
+        self.assertIn("docs/spec/README.md doesn't exist", repo.run("check").output)
+
+    def test_mark_refuses_uncommitted_feature_doc(self):
+        repo = self.repo(tree=True)
+        repo.write("docs/spec/xp.md", XP_DOC.replace("10 XP", "12 XP"))
+        self.assertIn("uncommitted changes", repo.run("mark").output)
+
+
+class AuthorTests(SpecloopTestCase):
+    """A merged spec PR reaches everyone who pulls. Only its author's clone builds it."""
+
+    def pull_spec_change_by(self, repo, email):
+        repo.git("checkout", "-q", "-b", "origin-main")
+        repo.change_spec()
+        repo.commit_as("Alice", email, "raise scan XP")
+        repo.git("checkout", "-q", "main")
+        repo.enable_hooks()
+        return repo.git("merge", "-q", "--ff-only", "origin-main").output
+
+    def test_someone_elses_spec_change_doesnt_launch(self):
+        repo = self.repo()
+        out = self.pull_spec_change_by(repo, "alice@example.com")
+        self.assertIn("by alice@example.com, so their sync is theirs to start", out)
+        self.assertEqual(repo.claude_calls(), [])
+        self.assertIn("not started      by alice@example.com, so the hook left it to them", repo.run("status").stdout)
+
+    def test_your_own_merged_change_launches(self):
+        repo = self.repo()
+        self.pull_spec_change_by(repo, "test@example.com")
+        self.assertEqual(len(repo.claude_calls()), 1)
+
+    def test_extra_address_counts_as_you(self):
+        repo = self.repo()
+        repo.git("config", "--add", "specloop.email", "123+test@users.noreply.github.com")
+        self.pull_spec_change_by(repo, "123+Test@users.noreply.github.com")
+        self.assertEqual(len(repo.claude_calls()), 1)
+
+    def test_trigger_all_builds_everyones_changes(self):
+        repo = self.repo()
+        repo.write("specloop.json", json.dumps({"tests": {"paths": ["tests"]}, "sync": {"trigger": "all"}}))
+        repo.commit("build everything", SPEC_SYNC="off")
+        self.pull_spec_change_by(repo, "alice@example.com")
+        self.assertEqual(len(repo.claude_calls()), 1)
+
+
+class CursorTests(SpecloopTestCase):
+    def cursor_repo(self, **kwargs):
+        repo = self.repo(**kwargs)
+        repo.git("config", "specloop.harness", "cursor")
+        repo.enable_hooks()
+        self.addCleanup(lambda: subprocess.run(["pkill", "-f", f"sleep 5"], capture_output=True))
+        return repo
+
+    def test_harness_comes_from_git_config_then_specloop_json(self):
+        repo = self.repo()
+        self.assertEqual(repo.run("harness").stdout.strip(), "claude")
+        repo.write("specloop.json", json.dumps({"sync": {"harness": "cursor"}}))
+        self.assertEqual(repo.run("harness").stdout.strip(), "cursor")
+        repo.git("config", "specloop.harness", "claude")
+        self.assertEqual(repo.run("harness").stdout.strip(), "claude")
+        repo.git("config", "specloop.harness", "vim")
+        self.assertIn("unknown harness 'vim'", repo.run("harness").output)
+
+    def test_spec_commit_starts_cursor_agent_in_a_locked_worktree(self):
+        repo = self.cursor_repo(tree=True)
+        repo.change_spec()
+        out = repo.commit("raise scan XP").output
+        self.assertIn("started background Cursor agent", out)
+        self.assertEqual(repo.claude_calls(), [])
+        short = repo.git("rev-parse", "--short", "HEAD").stdout.strip()
+        tree = (repo.path / ".specloop" / "worktrees" / f"spec-sync-{short}").resolve()
+
+        [run] = repo.agent_runs()
+        self.assertEqual(Path(run[0]).resolve(), tree)
+        self.assertEqual(run[1:5], ["-p", "--force", "--trust", "--workspace"])
+        self.assertEqual(Path(run[5]).resolve(), tree)
+        self.assertIn(".claude/skills/spec-sync/SKILL.md", run[-1])
+
+        self.assertEqual(repo.git("-C", str(tree), "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), f"spec-sync/{short}")
+        listing = repo.git("worktree", "list", "--porcelain").stdout
+        self.assertRegex(listing, r"locked cursor agent session spec-sync-\w+ \(pid \d+\)")
+        self.assertEqual(repo.git("check-ignore", f".specloop/worktrees/spec-sync-{short}").returncode, 0)
+        [record] = repo.syncs()
+        self.assertEqual((record["status"], record["harness"]), ("starting", "cursor"))
+        self.assertIn("starting", repo.run("status").stdout)
+
+    def test_agent_that_exits_at_once_is_recorded_failed(self):
+        repo = self.cursor_repo(agent_exit=1)
+        repo.change_spec()
+        out = repo.commit("raise scan XP").output
+        self.assertIn("Cursor's agent exited at once: Authentication required", out)
+        self.assertIn("failed           agent exited at once: Authentication required", repo.run("status").stdout)
+        # Its worktree goes on the next cleanup; the dead pid frees the lock.
+        self.assertIn("removed .specloop/worktrees/spec-sync-", repo.run("cleanup").output)
+
+    def test_finished_cursor_sync_is_cleaned_up_after_merge(self):
+        repo = self.cursor_repo()
+        repo.change_spec()
+        repo.commit("raise scan XP")
+        short = repo.git("rev-parse", "--short", "HEAD").stdout.strip()
+        tree = repo.path / ".specloop" / "worktrees" / f"spec-sync-{short}"
+        repo.run_in(tree, "sync", "running")
+        (tree / "app.py").write_text("XP = 12\n")
+        repo.run_in(tree, "mark", "HEAD")
+        repo.git("-C", str(tree), "add", "-A")
+        repo.git("-C", str(tree), "commit", "-q", "-m", "Spec sync: raise scan XP", SPEC_SYNC="off")
+        repo.run_in(tree, "sync", "done")
+        out = repo.git("merge", "-q", f"spec-sync/{short}").output
+        self.assertIn(f"removed .specloop/worktrees/spec-sync-{short} (implemented; deleted spec-sync/{short})", out)
+        self.assertFalse(tree.exists())
+        self.assertEqual(repo.claude_calls(), [], "a Cursor sync is stopped by pid, not through claude")
+
+    def test_dry_run_names_the_harness(self):
+        repo = self.cursor_repo()
+        repo.change_spec()
+        self.assertIn("would start background cursor session", repo.commit("raise", SPEC_SYNC="dry-run").output)
+        self.assertEqual(repo.agent_runs(), [])
 
 
 if __name__ == "__main__":
