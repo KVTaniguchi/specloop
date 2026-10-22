@@ -96,6 +96,10 @@ Claude Code's auto-mode safety check blocked writing the post-commit hook itself
 For an app that already existed, drafting the spec from intent ("what should it do?") would have produced a wish list that didn't match the code. Drafting from code produced an accurate baseline. It also wrote down odd behavior faithfully (the "Map" tab hosts the camera) rather than fixing it quietly.
 **Takeaway:** for existing projects, describe what the code does first. Intent changes come afterwards as normal spec diffs.
 
+### 2026-10-21 — The spec is out of sight, and there's no obvious way to point at a rule
+On KTCatPokemon the user had to ask to see the spec every time it came up, and wasn't sure how to propose a change: copy-paste a passage into chat? There's no equivalent of `File.swift:42` for the spec. Rule IDs (`SCAN-5`) are that reference and are steadier than line numbers, but nothing in the workflow teaches that. And a table row inside a rule (one SCAN-5 outcome) has no ID of its own.
+**Open question:** should specloop ship a spec view that stays beside the chat, with rule IDs you can click to drop into a prompt, plus pending and coverage status? Should the skills always open the spec at the rule they're discussing? Does a README section on "how to ask for a spec change" cover enough?
+
 ---
 
 ## Open questions
