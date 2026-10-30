@@ -1861,14 +1861,16 @@ def cmd_hook(root, config, args):
 parse_version = project.parse_version
 
 
-def upgrade_command():
+def upgrade_command(here=None):
     """How this copy of specloop is upgraded, from where it's installed."""
-    here = Path(__file__).resolve()
+    here = here or Path(__file__).resolve()
     if "/Cellar/" in str(here):
         return "brew upgrade specloop"
     if "/pipx/" in str(here):
         return "pipx upgrade specloop"
-    return f"git pull in {here.parents[2]}"
+    if "site-packages" in here.parts:
+        return "pip install --upgrade specloop"
+    return f"git pull in {here.parents[2]}"  # a checkout, run through bin/specloop or install.sh
 
 
 def version_gap(config):

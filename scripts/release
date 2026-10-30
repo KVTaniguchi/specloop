@@ -1,0 +1,51 @@
+#!/bin/sh
+#
+# Cut a specloop release:  scripts/release 0.2.0
+#
+# Does everything that stays on this machine: sets the version, refreshes
+# the packaged changelog and known-copies.json, adds the release's
+# compatibility fixture, runs the tests, commits, tags and builds. Then it
+# prints the steps that publish (push, PyPI, the Homebrew tap), which run
+# under the owner's accounts, for the owner to run.
+
+set -eu
+version=${1:?usage: scripts/release VERSION}
+root=$(cd "$(dirname "$0")/.." && pwd)
+cd "$root"
+
+echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || { echo "error: $version isn't a version like 0.2.0" >&2; exit 1; }
+[ -z "$(git status --porcelain)" ] || { echo "error: commit or stash your changes first" >&2; exit 1; }
+grep -q "^## $version\$" CHANGELOG.md || { echo "error: CHANGELOG.md has no '## $version' section" >&2; exit 1; }
+git rev-parse -q --verify "refs/tags/v$version" >/dev/null && { echo "error: v$version is already tagged" >&2; exit 1; }
+
+sed -i.bak "s/^__version__ = .*/__version__ = \"$version\"/" src/specloop/__init__.py && rm src/specloop/__init__.py.bak
+cp CHANGELOG.md src/specloop/data/CHANGELOG.md
+git add -A
+git commit -q -m "Release $version
+
+Spec-Rules: none (release)
+Harness: human"
+scripts/known-copies
+scripts/make-fixture "$version"
+python3 -m unittest discover tests
+git add -A
+git commit -q --amend --no-edit
+git tag "v$version"
+
+rm -rf dist
+python3 -m build >/dev/null
+sha=$(shasum -a 256 "dist/specloop-$version.tar.gz" | cut -d' ' -f1)
+
+cat <<DONE
+
+Released v$version locally. To publish:
+
+  git push --follow-tags
+  twine upload dist/*
+
+Then in the KVTaniguchi/homebrew-tap repository, set Formula/specloop.rb
+(template: packaging/homebrew/specloop.rb) to:
+
+  url "https://files.pythonhosted.org/packages/source/s/specloop/specloop-$version.tar.gz"
+  sha256 "$sha"
+DONE

@@ -8,10 +8,12 @@ minimum version, and `specloop update`.
 
 import json
 import re
+import shutil
 import os
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from test_specloop import HERE, Repo, SpecloopTestCase
 
@@ -461,3 +463,35 @@ class ToleranceTests(SpecloopTestCase):
         out = repo.run("blame", "--commit", "HEAD")
         self.assertEqual(out.returncode, 0, out.output)
         self.assertIn("XP-1", out.stdout)
+
+
+class CompatTests(SpecloopTestCase):
+    """Every release reads every earlier release's projects. Each fixture is a
+    project made by one release (scripts/make-fixture)."""
+
+    def test_fixtures_still_read(self):
+        fixtures = sorted((HERE / "tests" / "fixtures").glob("v*"))
+        self.assertTrue(fixtures, "no fixtures; run scripts/make-fixture")
+        env = {**os.environ, "PATH": f"{HERE / 'bin'}:{os.environ['PATH']}"}
+        for fixture in fixtures:
+            with self.subTest(fixture.name):
+                path = self.tmp / fixture.name
+                subprocess.run(["git", "clone", "-q", str(fixture / "repo.bundle"), str(path)], check=True)
+                shutil.copytree(fixture / "state", path / ".git" / "specloop")
+                for command in (["status"], ["check"], ["coverage"], ["pending"], ["signals", "--all"]):
+                    out = subprocess.run(["specloop", *command], cwd=path, env=env, capture_output=True, text=True)
+                    self.assertEqual(out.returncode, 0, f"{command}: {out.stdout}{out.stderr}")
+                    self.assertNotIn("Traceback", out.stderr)
+
+
+class UpgradeCommandTests(unittest.TestCase):
+    def test_by_install_location(self):
+        from specloop import cli
+        cases = {
+            "/opt/homebrew/Cellar/specloop/0.1.0/libexec/lib/python3.12/site-packages/specloop/cli.py": "brew upgrade specloop",
+            "/Users/me/.local/pipx/venvs/specloop/lib/python3.12/site-packages/specloop/cli.py": "pipx upgrade specloop",
+            "/Users/me/venv/lib/python3.9/site-packages/specloop/cli.py": "pip install --upgrade specloop",
+        }
+        for path, expected in cases.items():
+            self.assertEqual(cli.upgrade_command(Path(path)), expected, path)
+        self.assertEqual(cli.upgrade_command(HERE / "src/specloop/cli.py"), f"git pull in {HERE}")

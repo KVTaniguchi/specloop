@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""
+Make tests/fixtures/v<version>/: a small project set up by this version of
+specloop, so later versions' tests can check they still read it.
+
+    scripts/make-fixture 0.1.0
+
+The project has a tree spec, tagged tests, a ledger, a sync that was built,
+merged and archived by cleanup, and a signal. repo.bundle holds its history;
+state/ holds its .git/specloop/ (sync records), which a bundle can't carry.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+version = sys.argv[1] if len(sys.argv) > 1 else sys.exit("usage: scripts/make-fixture VERSION")
+out = ROOT / "tests" / "fixtures" / f"v{version}"
+if out.exists():
+    sys.exit(f"{out.relative_to(ROOT)} exists; a release's fixture never changes")
+
+env = {**os.environ, "PATH": f"{ROOT / 'bin'}:{os.environ['PATH']}", "SPEC_SYNC": "off",
+       "GIT_AUTHOR_DATE": "2026-10-30T12:00:00Z", "GIT_COMMITTER_DATE": "2026-10-30T12:00:00Z"}
+
+
+def run(*args, cwd):
+    return subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, check=True).stdout
+
+
+def commit(message, cwd):
+    run("git", "add", "-A", cwd=cwd)
+    run("git", "commit", "-q", "-m", message, cwd=cwd)
+
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    project = Path(tmp) / "project"
+    project.mkdir()
+    run("git", "init", "-q", "-b", "main", cwd=project)
+    run("git", "config", "user.name", "Fixture", cwd=project)
+    run("git", "config", "user.email", "fixture@example.com", cwd=project)
+    write(project / "specloop.json", json.dumps(
+        {"minVersion": version, "spec": "docs/spec", "tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}, indent=2) + "\n")
+    write(project / "docs/spec/README.md", "# Spec\n\nFeatures: [XP](xp.md).\n")
+    write(project / "docs/spec/xp.md", "# XP\n\nPart of the [spec](README.md).\n\n- **XP-1:** A scan pays 10 XP.\n- **XP-2:** A relabel pays the scanner's XP.\n")
+    write(project / "tests/test_rules.py", "# Spec: XP-1\ndef test_scan(): pass\n\n# Spec: XP-2\ndef test_relabel(): pass\n")
+    write(project / "app.py", "XP = 10\n")
+    run("specloop", "init", cwd=project)
+    commit("Baseline\n\nSpec-Rules: none (baseline)\nHarness: human", project)
+    run("specloop", "mark", cwd=project)
+    commit("Ledger\n\nSpec-Rules: none (ledger)\nHarness: human", project)
+
+    # A spec change, built by a sync in its own worktree, merged, and cleaned up.
+    write(project / "docs/spec/xp.md", (project / "docs/spec/xp.md").read_text().replace("10 XP", "12 XP"))
+    commit("Raise scan XP", project)
+    short = run("git", "rev-parse", "--short", "HEAD", cwd=project).strip()
+    tree = project / ".claude" / "worktrees" / f"spec-sync-{short}"
+    run("git", "worktree", "add", "-q", "-b", f"spec-sync/{short}", str(tree), "HEAD", cwd=project)
+    run("specloop", "sync", "running", cwd=tree)
+    write(tree / "app.py", "XP = 12\n")
+    run("specloop", "mark", "HEAD", cwd=tree)
+    trailers = run("specloop", "trailers", "--model", "fixture-model", cwd=tree)
+    commit(f"Spec sync: raise scan XP\n\n{trailers}", tree)
+    run("specloop", "sync", "done", cwd=tree)
+    run("git", "merge", "-q", f"spec-sync/{short}", cwd=project)
+    run("specloop", "cleanup", cwd=project)
+
+    run("specloop", "signal", "add", "--source", "qa", "--summary", "Scan XP feels low", "--rule", "XP-1", cwd=project)
+    commit("Signal\n\nSpec-Rules: none (signal)\nHarness: human", project)
+
+    out.mkdir(parents=True)
+    run("git", "bundle", "create", "-q", str(out / "repo.bundle"), "--all", cwd=project)
+    shutil.copytree(project / ".git" / "specloop", out / "state")
+
+print(f"wrote {out.relative_to(ROOT)}")
