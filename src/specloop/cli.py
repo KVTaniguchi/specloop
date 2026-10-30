@@ -36,6 +36,11 @@ specloop — keep a spec, the code, and the tests in lockstep.
                                      one once it's on HEAD (and, for a spec
                                      change, once the code is built)
 
+  Installing and updating (docs/distribution.md):
+    specloop --version               the installed version
+    specloop skill NAME              a skill's instructions for this version
+                                     (what the stubs in .claude/skills/ run)
+
 Configuration lives in specloop.json at the project root (found by walking up
 from the current directory). Python 3.8+, standard library only.
 
@@ -59,10 +64,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from specloop import __version__
-
-# Skill texts, the trigger and templates, shipped with the package.
-DATA = Path(__file__).resolve().parent / "data"
+from specloop import __version__, project
 
 DEFAULTS = {
     "spec": "docs/SPEC.md",
@@ -1796,6 +1798,15 @@ def report(findings, args):
     return 1 if errors else 0
 
 
+def cmd_skill(root, config, args):
+    if args.name not in project.SKILLS:
+        print(f"specloop: no skill named {args.name}; there are {', '.join(project.SKILLS)}", file=sys.stderr)
+        return 2
+    print(f"<!-- specloop {__version__} -->")
+    print(project.skill_text(args.name), end="")
+    return 0
+
+
 def cmd_status(root, config, args):
     base, diff = pending_diff(root, config)
     claims = test_claims(root, config)
@@ -1907,6 +1918,8 @@ def run():
     p.add_argument("--by", choices=["layer", "harness"], help="counts of confirmed signals")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")
+    p = sub.add_parser("skill", help="print a skill's instructions for this version")
+    p.add_argument("name")
     args = parser.parse_args()
 
     root = find_root()
@@ -1926,6 +1939,7 @@ def run():
         "signal": cmd_signal,
         "signals": cmd_signals,
         "config": cmd_config,
+        "skill": cmd_skill,
     }[args.command]
     return handler(root, config, args)
 
