@@ -1,13 +1,13 @@
 #!/bin/sh
 #
-# specloop trigger, shared by the post-commit, post-merge and post-rewrite
-# hooks. When an update brings in a spec change the code doesn't match yet,
+# specloop trigger, run by `specloop hook commit|merge|rebase` from the
+# post-commit, post-merge and post-rewrite hooks. When an update brings in a spec change the code doesn't match yet,
 # start a background coding agent in its own worktree that runs /spec-sync
 # and leaves the implementation on a <branchPrefix><sha> branch for review.
 # The agent is Claude Code or Cursor (`tools/specloop harness`).
 #
-#   specloop-trigger commit           after a commit (compares with HEAD^1)
-#   specloop-trigger merge|rebase     after a merge, pull or rebase (compares with ORIG_HEAD)
+#   specloop hook commit              after a commit (compares with HEAD^1)
+#   specloop hook merge|rebase        after a merge, pull or rebase (compares with ORIG_HEAD)
 #
 # Enable once per clone:   git config core.hooksPath tools/githooks
 # Pick your agent:         git config specloop.harness cursor   (default: claude)

@@ -38,6 +38,8 @@ specloop — keep a spec, the code, and the tests in lockstep.
 
   Installing and updating (docs/distribution.md):
     specloop --version               the installed version
+    specloop init [PATH]             set up a project: shims, hooks, skill stubs,
+                                     specloop.json and a starter spec
     specloop skill NAME              a skill's instructions for this version
                                      (what the stubs in .claude/skills/ run)
 
@@ -1798,6 +1800,48 @@ def report(findings, args):
     return 1 if errors else 0
 
 
+def report_changes(changes):
+    verbs = {"create": "created", "replace": "replaced", "delete": "removed"}
+    for change in changes:
+        if change.action == "keep":
+            print(f"kept {change.path}: {change.note}")
+        else:
+            print(f"{verbs[change.action]} {change.path}")
+            if change.note:
+                print(change.note.rstrip("\n"))
+
+
+def cmd_init(root, config, args):
+    target = Path(args.path).resolve()
+    if not succeeds(target, "rev-parse", "--git-dir"):
+        print(f"error: {target} is not a git repository", file=sys.stderr)
+        return 1
+    config = load_config(target)
+    changes = project.plan_init(target, config)
+    project.write_files(target, changes)
+    report_changes(changes)
+    print(f"\nspecloop {__version__} set up in {target}\n")
+    print("Next:")
+    print("  1. Fill in specloop.json, especially commands.test and tests.paths.")
+    print("  2. Run /spec-init in Claude Code or Cursor to draft the spec from the code, or write it yourself.")
+    print(f"  3. Enable the trigger:  git -C \"{target}\" config core.hooksPath tools/githooks")
+    print(f"     Using Cursor?        git -C \"{target}\" config specloop.harness cursor")
+    return 0
+
+
+def cmd_hook(root, config, args):
+    """What the git hooks run. The trigger is a shell script shipped with
+    the package; commit-msg checks trailers in-process."""
+    first = args.args[0] if args.args else ""
+    if args.mode == "commit-msg":
+        return verify_message(root, config, first)
+    if args.mode == "merge" and first == "1":
+        return 0  # a squash merge commits nothing yet; post-commit handles that commit
+    if args.mode == "rebase" and first != "rebase":
+        return 0  # amends are left to post-commit, which has already run
+    return subprocess.run(["sh", str(project.DATA / "specloop-trigger"), args.mode]).returncode
+
+
 def cmd_skill(root, config, args):
     if args.name not in project.SKILLS:
         print(f"specloop: no skill named {args.name}; there are {', '.join(project.SKILLS)}", file=sys.stderr)
@@ -1918,6 +1962,11 @@ def run():
     p.add_argument("--by", choices=["layer", "harness"], help="counts of confirmed signals")
     p = sub.add_parser("config")
     p.add_argument("key", nargs="?")
+    p = sub.add_parser("init", help="set up specloop in a project")
+    p.add_argument("path", nargs="?", default=".")
+    p = sub.add_parser("hook", help="what the git hooks run")
+    p.add_argument("mode", choices=sorted(set(project.HOOKS.values())))
+    p.add_argument("args", nargs=argparse.REMAINDER)
     p = sub.add_parser("skill", help="print a skill's instructions for this version")
     p.add_argument("name")
     args = parser.parse_args()
@@ -1940,6 +1989,8 @@ def run():
         "signals": cmd_signals,
         "config": cmd_config,
         "skill": cmd_skill,
+        "init": cmd_init,
+        "hook": cmd_hook,
     }[args.command]
     return handler(root, config, args)
 

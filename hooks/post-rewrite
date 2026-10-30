@@ -1,5 +1,0 @@
-#!/bin/sh
-# specloop: start /spec-sync when a rebase (e.g. pull --rebase) brings in a
-# spec change. Amends are left to post-commit, which has already run.
-[ "$1" = rebase ] || exit 0
-exec "$(dirname "$0")/specloop-trigger" rebase
