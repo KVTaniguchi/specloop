@@ -459,6 +459,24 @@ class CleanupTests(SpecloopTestCase):
         self.assertEqual(repo.syncs(), [])
         self.assertEqual(repo.claude_calls(), ["stop abc12345", "rm abc12345"])
 
+    def test_cleanup_archives_the_implemented_sync(self):
+        # Measuring the spec route needs a merged sync's timing after cleanup.
+        repo = self.repo()
+        rev = repo.spec_change()
+        path, short = repo.finished_sync(rev, lock_pid=self.dead_pid())
+        built = repo.git("-C", str(path), "rev-parse", "HEAD").stdout.strip()
+        repo.git("merge", "-q", f"spec-sync/{short}")
+        repo.run("cleanup")
+        [record] = [json.loads(p.read_text()) for p in (repo.path / ".git" / "specloop" / "syncs" / "done").glob("*.json")]
+        self.assertEqual(record["rev"], rev)
+        self.assertEqual(record["status"], "done")
+        self.assertTrue(record["started"] and record["finished"] and record["archived"])
+        self.assertEqual(record["built"], built)
+        self.assertEqual(record["branchTip"], built)
+        self.assertTrue(record["branchMerged"])
+        self.assertEqual(record["ledger"], rev)
+        self.assertEqual(repo.syncs(), [], "status and the hook no longer see it")
+
     def test_next_commit_cleans_up_a_merged_sync(self):
         # post-commit runs with GIT_INDEX_FILE=.git/index, which broke removal.
         repo = self.repo()

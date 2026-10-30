@@ -115,6 +115,7 @@ Then:
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
 - [Attribution and feedback](docs/attribution.md): commit trailers, blame, signals and triage
 - [Lessons](docs/lessons.md): what happened on a real project
+- [Measuring it](docs/measurement.md): how to tell whether the spec route pays off, and what to change if it doesn't
 - [Example: iOS / Swift](examples/ios-swift/)
 
 ## Development

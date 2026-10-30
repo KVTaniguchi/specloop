@@ -549,6 +549,17 @@ def remove_sync(root, rev):
         path.unlink()
 
 
+def archive_sync(root, record):
+    """Move an implemented sync's record to syncs/done/, out of what `status`
+    and the hook read, so its timing survives for measuring the spec route
+    (docs/measurement.md)."""
+    directory = state_dir(root) / "syncs" / "done"
+    directory.mkdir(parents=True, exist_ok=True)
+    record["archived"] = stamp()
+    (directory / f"{record['rev']}.json").write_text(json.dumps(record, indent=2) + "\n")
+    remove_sync(root, record["rev"])
+
+
 def is_active(record, config):
     """A sync that should stop the hook from starting another: launched or
     running, and not gone quiet for longer than it plausibly could."""
@@ -1234,8 +1245,9 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
     if removal.returncode != 0:
         return False, f"couldn't remove {where}: {removal.stderr.strip()}"
 
-    branch, note = tree["branch"], ""
+    branch, note, tip, merged = tree["branch"], "", "", False
     if branch:
+        tip = git(root, "rev-parse", "-q", "--verify", f"{branch}^{{commit}}", check=False).strip()
         merged = succeeds(root, "merge-base", "--is-ancestor", branch, "HEAD")
         own_commits = git(root, "rev-list", f"{rev}..{branch}", check=False).strip() if rev else "unknown"
         if merged or not own_commits:
@@ -1247,7 +1259,11 @@ def remove_sync_worktree(root, config, tree, record, rev, why, dry_run):
         subprocess.run(["claude", "rm", session_id], capture_output=True)  # its entry in `claude agents`
     if record:
         if why == "implemented":
-            remove_sync(root, record["rev"])
+            # A branch tip past the sync's own last commit means someone added
+            # commits before merging. A squash merge reads as not merged.
+            record["branchTip"], record["branchMerged"] = tip, merged
+            record["ledger"] = baseline(root, config)
+            archive_sync(root, record)
         elif record.get("status") != "failed":
             record["status"] = "failed"
             record["note"] = "the session ended without reporting; its worktree was cleaned up"
@@ -1371,6 +1387,8 @@ def cmd_sync(root, config, args):
                 remove_sync(root, other)
     if args.status in ("done", "blocked", "failed"):
         record["finished"] = stamp()
+        if args.status == "done":
+            record["built"] = git(root, "rev-parse", "HEAD").strip()
     else:
         record.pop("finished", None)  # a new attempt at a revision that failed before
     record["status"] = args.status
