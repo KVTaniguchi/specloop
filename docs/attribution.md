@@ -30,7 +30,7 @@ Spec sync: XP bonus uses the scanner's breed
 Spec-Rev: 9f8e7d6c2b1a
 Spec-Rules: XP-6@3fa2c1, LVL-2@b71e09
 Harness: claude-code claude-opus-5-5
-Harness-Rev: spec-sync@41d0aa claude-md@9c2e11
+Harness-Rev: specloop@0.3.0 claude-md@9c2e11
 Sync: 9f8e7d6
 ```
 
@@ -39,14 +39,14 @@ Sync: 9f8e7d6
 | `Spec-Rev` | The commit whose spec this code implements, the same value `specloop mark` writes to the ledger | the ledger |
 | `Spec-Rules` | Each rule the commit implements or changes, as `ID@version` | the spec diff the sync built |
 | `Harness` | The agent and model | `specloop.harness` and the agent's own report |
-| `Harness-Rev` | Short hashes of the skill file and of the project's agent instructions at the time | the files in the worktree |
+| `Harness-Rev` | The specloop version, which carries the skills and the managed part of `CLAUDE.md`, then short hashes of the project's own part of its agent instructions, and of any skill it keeps as a local fork | the installed specloop and the files in the worktree |
 | `Sync` | The sync record this commit came from | `.git/specloop/syncs/` |
 
 ### Versions
 
 - **A rule's version** is a short hash of its text, as `rule_texts` already reads it (every line the ID owns, whitespace-normalized). Rewording a rule changes its version; moving it to another doc doesn't. Nobody bumps a number by hand.
 - **The spec's version** is the git commit. Nothing new is needed.
-- **The harness's version** is the agent and model plus `Harness-Rev`. Skill and instruction files change outcomes as much as the model does, so they're versioned the same way as rules: by content hash.
+- **The harness's version** is the agent and model plus `Harness-Rev`. Skill and instruction files change outcomes as much as the model does. The skills ship with specloop, so its version stands for them. The project's own instructions are versioned the same way as rules: by content hash, of everything outside specloop's markers. Commits made before 0.1.0 name `spec-sync@<hash>` instead, and `signals --by harness` keeps the two styles in separate groups.
 
 `specloop trailers` prints the block for the current worktree, so `/spec-sync` and people both get the same values without assembling them.
 
@@ -87,7 +87,7 @@ Output is one block per commit it reaches:
 src/XP/Bonus.swift:42
   a1b2c3d  2026-10-20  Spec sync: XP bonus uses the scanner's breed
     spec     9f8e7d6  XP-6@3fa2c1 (current: 3fa2c1, unchanged)
-    harness  claude-code claude-opus-5-5  spec-sync@41d0aa
+    harness  claude-code claude-opus-5-5  specloop@0.3.0
     tests    XPTests.swift: "XP-6: picking another breed pays the scanner's XP"
 ```
 
@@ -112,7 +112,7 @@ One record per piece of feedback, one file per record under `docs/signals/` (`si
     "rules": ["XP-6@3fa2c1"],
     "commits": ["a1b2c3d"],
     "harness": "claude-code claude-opus-5-5",
-    "harness_rev": "spec-sync@41d0aa claude-md@9c2e11",
+    "harness_rev": "specloop@0.3.0 claude-md@9c2e11",
     "traced_by": "specloop blame"
   },
   "triage": {
@@ -165,7 +165,7 @@ Each signal is blamed on one layer. The layer decides what kind of fix it gets. 
 | | `regression` | Did a later commit break a rule an earlier one implemented? | Fix it, and a test that would have caught it |
 | **verification** | `weak-test` | Is there a test tagged with the rule that passed anyway? | Strengthen the test |
 | | `untested` | Is the rule implemented with no test naming it? | Add a test; consider `--require` for its prefix |
-| **harness** | `skill` | Did the agent follow its instructions, and the instructions led it wrong? | Change the skill, plus a lesson |
+| **harness** | `skill` | Did the agent follow its instructions, and the instructions led it wrong? | An issue or PR against specloop, plus a lesson |
 | | `context` | Was something the agent needed missing from `CLAUDE.md` / `AGENTS.md`? | Add it |
 | | `model` | Do the same rule and instructions fail with one model and not another? | Record it; change the configured model if it's a pattern |
 | **outside** | `env`, `ops`, `dependency` | Is the cause outside the code the spec describes? | Not specloop's to fix; close with a link |
@@ -205,7 +205,7 @@ Fixes to the **harness** are different, because one bad session isn't evidence a
 
 - A single `harness` signal produces a lesson in `docs/lessons.md`, which is what happens by hand today, and nothing more.
 - A skill or instruction change is proposed when **several confirmed signals share a layer and kind** under the same `Harness-Rev` (`feedback.harnessThreshold`, default 3). The proposal cites them.
-- That change is a reviewed PR like any spec change. Its new `Harness-Rev` makes the next signals comparable to the old ones.
+- That change is a reviewed PR like any spec change. The skills ship with specloop, so a skill change is a PR against specloop and arrives as a new version; a change to the project's own instructions is a PR in the project. Either way its new `Harness-Rev` makes the next signals comparable to the old ones.
 
 `specloop signals` reports the counts:
 
@@ -241,6 +241,6 @@ Steps 1 and 2 are cheap and pay off right away. Steps 4 and 5 depend on how good
 ## Open questions
 
 - **Where should signals live for a team that doesn't want them in the repo?** GitHub issues with a label and the JSON in a code block would work, at the cost of reading them over the network.
-- **Does `Harness-Rev` need to cover more?** Hooks, `specloop.json` and the specloop version itself also shape what a sync does.
+- **Does `Harness-Rev` need to cover more?** Hooks and `specloop.json` also shape what a sync does. *(The specloop version is now covered: see [distribution.md](distribution.md).)*
 - **Can triage tell `ambiguous` from `misread` reliably?** Both look like "the code doesn't do what I meant". If people disagree about it often, the two kinds may need to merge.
 - **What about signals with no locus?** A QA report like "leveling feels slow" points at a rule, not a line. It can still be attributed by rule (`--rule LVL-1`), but blame has nothing to follow.

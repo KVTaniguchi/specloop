@@ -132,9 +132,10 @@ TRAILER = re.compile(r"^(%s):[ \t]*(.*?)\s*$" % "|".join(TRAILER_KEYS), re.MULTI
 PASS_THROUGH = {"format", "rename", "move"}
 # What `Harness:` calls each agent the hook can start.
 AGENT_NAMES = {"claude": "claude-code", "cursor": "cursor"}
-# The files that tell an agent how to build, by the name Harness-Rev gives them.
+# The project's own instruction files, by the name Harness-Rev gives them.
+# Only the part outside specloop's markers counts: the specloop version
+# covers the managed block, and the skills.
 HARNESS_FILES = (
-    ("spec-sync", ".claude/skills/spec-sync/SKILL.md"),
     ("claude-md", "CLAUDE.md"),
     ("agents-md", "AGENTS.md"),
 )
@@ -890,10 +891,17 @@ def trace(root, config, locus=None, test=None, rule=None, commit=None):
 
 
 def harness_revs(root):
-    """Harness-Rev: a short content hash of each instruction file present."""
-    return " ".join(
-        f"{name}@{git(root, 'hash-object', path).strip()[:6]}" for name, path in HARNESS_FILES if (root / path).is_file()
-    )
+    """Harness-Rev: the specloop version, then a short content hash of each
+    skill that's a local fork and of the project's part of each instruction
+    file present."""
+    revs = [f"specloop@{__version__}"]
+    for path in project.forks(root):
+        revs.append(f"{path.parent.name}@{project.blob_hash(path.read_bytes())[:6]}")
+    for name, rel in HARNESS_FILES:
+        if (root / rel).is_file():
+            own = project.outside_block((root / rel).read_text()).encode()
+            revs.append(f"{name}@{project.blob_hash(own)[:6]}")
+    return " ".join(revs)
 
 
 def needs_trailers(config, files):

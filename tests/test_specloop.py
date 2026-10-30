@@ -898,7 +898,7 @@ class TrailerTests(SpecloopTestCase):
         before = repo.run_in(path, "trailers", "--model", "claude-opus-5-5")
         self.assertEqual(before.returncode, 0, before.output)
         self.assertIn(f"Spec-Rev: {rev[:12]}\nSpec-Rules: XP-1@{XP1_NEW}\nHarness: claude-code claude-opus-5-5\n", before.stdout)
-        self.assertRegex(before.stdout, r"Harness-Rev: (spec-sync@[0-9a-f]{6} )?claude-md@[0-9a-f]{6}\n")
+        self.assertRegex(before.stdout, r"Harness-Rev: specloop@[0-9.]+ claude-md@[0-9a-f]{6}\n")
         self.assertIn(f"Sync: {short}", before.stdout)
         repo.run_in(path, "mark", "HEAD")
         self.assertEqual(repo.run_in(path, "trailers", "--model", "claude-opus-5-5").stdout, before.stdout)

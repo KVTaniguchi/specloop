@@ -7,6 +7,7 @@ minimum version, and `specloop update`.
 """
 
 import json
+import re
 import os
 import subprocess
 import sys
@@ -397,3 +398,66 @@ class ConfigEditTests(SpecloopTestCase):
         run_cli(repo, "update")
         config = json.loads((repo.path / "specloop.json").read_text())
         self.assertEqual(config, {"minVersion": "0.1.0", "tests": {"paths": ["tests"]}})
+
+
+def harness_rev(repo):
+    out = repo.run("trailers", "--none", "deps", "--model", "claude-opus-5-5").stdout
+    return re.search(r"^Harness-Rev: (.*)$", out, re.M).group(1)
+
+
+class HarnessRevTests(SpecloopTestCase):
+    def test_names_version_and_not_the_stub(self):
+        rev = harness_rev(self.repo())
+        self.assertTrue(rev.startswith("specloop@0.1.0 "), rev)
+        self.assertNotIn("spec-sync@", rev)
+        self.assertRegex(rev, r"claude-md@[0-9a-f]{6}$")
+
+    def test_claude_md_hash_covers_only_the_project_part(self):
+        repo = self.repo()
+        claude = repo.path / "CLAUDE.md"
+        before = harness_rev(repo)
+        claude.write_text(claude.read_text().replace(project.END, "- edited inside\n" + project.END))
+        self.assertEqual(harness_rev(repo), before)
+        claude.write_text(claude.read_text() + "\n- Project rule.\n")
+        self.assertNotEqual(harness_rev(repo), before)
+
+    def test_fork_is_named(self):
+        repo = self.repo()
+        repo.write(".claude/skills/spec-sync/SKILL.md", project.skill_text("spec-sync"))
+        self.assertRegex(harness_rev(repo), r"^specloop@0\.1\.0 spec-sync@[0-9a-f]{6} ")
+
+
+class ToleranceTests(SpecloopTestCase):
+    """A teammate on an older specloop still writes records a newer one made."""
+
+    def test_unknown_sync_field_survives(self):
+        repo = self.repo()
+        repo.spec_change()
+        repo.run("sync", "running")
+        [record_path] = (repo.path / ".git/specloop/syncs").glob("*.json")
+        record = json.loads(record_path.read_text())
+        record["fromTheFuture"] = 1
+        record_path.write_text(json.dumps(record))
+        repo.run("sync", "done")
+        self.assertEqual(json.loads(record_path.read_text())["fromTheFuture"], 1)
+
+    def test_unknown_signal_field_survives(self):
+        repo = self.repo()
+        repo.run("signal", "add", "--source", "qa", "--summary", "slow", "--rule", "XP-1")
+        [path] = (repo.path / "docs/signals").glob("*.json")
+        record = json.loads(path.read_text())
+        record["fromTheFuture"] = 1
+        path.write_text(json.dumps(record))
+        repo.run("signal", "triage", record["id"], "--layer", "spec", "--kind", "ambiguous",
+                 "--confidence", "low", "--reasoning", "r", "--confirm")
+        record = json.loads(path.read_text())
+        self.assertEqual(record["fromTheFuture"], 1)
+        self.assertEqual(record["triage"]["layer"], "spec")
+
+    def test_unknown_trailer_is_ignored(self):
+        repo = self.repo()
+        repo.write("app.py", "XP = 10\n")
+        repo.commit("code\n\nSpec-Rules: XP-1\nSpec-Future: x\nHarness: human", SPEC_SYNC="off")
+        out = repo.run("blame", "--commit", "HEAD")
+        self.assertEqual(out.returncode, 0, out.output)
+        self.assertIn("XP-1", out.stdout)

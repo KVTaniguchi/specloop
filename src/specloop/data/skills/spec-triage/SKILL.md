@@ -37,7 +37,7 @@ Note for each commit: the rules and their versions, whether each rule has **chan
 Then read:
 - each rule as it was at the commit's `Spec-Rev` (`git show <Spec-Rev>:<spec doc>`) and as it is now
 - the code at the locus, and the tests tagged with the rules
-- `CLAUDE.md`'s **Spec sync rules** and the spec-sync skill, if the harness is in question
+- `CLAUDE.md`'s **Spec sync rules** and the spec-sync skill (`tools/specloop skill spec-sync`), if the harness is in question
 
 ## 3. Classify
 
@@ -52,7 +52,7 @@ Pick **one** layer and kind. Work down the table and stop at the first row whose
 | | `regression` | a later commit broke what an earlier one built | fix, plus a test that would have caught it |
 | verification | `weak-test` | a test tagged with the rule passed anyway | strengthen the test |
 | | `untested` | the rule is implemented and no test names it | add one; consider `--require` for its prefix |
-| harness | `skill` | the agent followed its instructions and they led it wrong | change the skill, plus a lesson |
+| harness | `skill` | the agent followed its instructions and they led it wrong | an issue or PR against specloop, plus a lesson |
 | | `context` | something the agent needed wasn't in `CLAUDE.md` / `AGENTS.md` | add it |
 | | `model` | the same rule and instructions fail with one model and not another | record it; change models only on a pattern |
 | outside | `env`, `ops`, `dependency` | the cause is outside what the spec describes | none here; link where it's handled |
@@ -74,7 +74,7 @@ Draft the fix for that layer:
 - **spec:** the exact rule text to change or add, with its ID (a new rule gets a new number; IDs are never reused), ready for a spec PR whose commit ends with `Fixes-Signal: <id>`. Once it merges, `/spec-sync` builds it, sees the signal through `signals --pending`, and the signal closes when the code is built.
 - **implementation:** what's wrong in the code, by rule ID. Suggest a re-sync or a hand fix whose trailers name the rule and the signal: `tools/specloop trailers --rules <ID> --human --fixes <id>`.
 - **verification:** the test to add or strengthen, tagged with the rule ID, committed with `Fixes-Signal: <id>`.
-- **harness:** a dated entry for `docs/lessons.md` (what happened, the takeaway). Then run `tools/specloop signals --by harness`. Propose a change to the skill or `CLAUDE.md` **only** if it reports a pattern for this layer and kind, and cite the signal IDs it lists. One bad session isn't evidence about the instructions.
+- **harness:** a dated entry for `docs/lessons.md` (what happened, the takeaway). Then run `tools/specloop signals --by harness`. Propose a change **only** if it reports a pattern for this layer and kind, and cite the signal IDs it lists. One bad session isn't evidence about the instructions. The skills ship with specloop, so a fix to one is an issue or PR against specloop, not an edit here. A fix that's specific to this project goes in `CLAUDE.md`'s "Spec sync rules for this project" section, outside specloop's markers.
 - **outside:** where it should go instead.
 
 ## 5. Report
