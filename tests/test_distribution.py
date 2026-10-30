@@ -331,8 +331,8 @@ class UpdateTests(SpecloopTestCase):
         repo.write("tools/specloop", "#!/bin/sh\necho mine\n")
         out = run_cli(repo, "update")
         self.assertEqual((repo.path / "tools/specloop").read_text(), "#!/bin/sh\necho mine\n")
-        self.assertIn("kept tools/specloop", out.stdout)
-        self.assertIn("+echo mine", out.stdout)  # diff from specloop's version to the local file
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("tools/specloop is edited here", out.stderr)
 
     def test_older_cli_refuses_to_update(self):
         repo = self.repo()
@@ -527,3 +527,97 @@ class InstallScriptTests(SpecloopTestCase):
         out = self.install(home, fresh_git_repo(self.tmp / "app"))
         self.assertNotEqual(out.returncode, 0)
         self.assertEqual((home / ".local/bin/specloop").read_text(), "#!/bin/sh\n")
+
+
+class ReviewFixTests(SpecloopTestCase):
+    copied_install = UpdateTests.copied_install
+
+    def test_edited_copied_cli_changes_nothing_and_commits_still_work(self):
+        repo = self.repo()
+        self.copied_install(repo)
+        cli = repo.path / "tools/specloop"
+        cli.write_text(cli.read_text() + "# local tweak\n")
+        repo.commit("tweak", SPEC_SYNC="off")
+        out = run_cli(repo, "update")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("tools/specloop is edited here", out.output)
+        self.assertEqual(repo.git("status", "--porcelain").stdout, "", "update changed nothing")
+        repo.enable_hooks()
+        repo.write("app.py", "x = 1\n")
+        self.assertEqual(repo.commit("code\n\nSpec-Rules: none (deps)").returncode, 0)
+
+    def test_commit_succeeds_when_tools_specloop_is_missing(self):
+        repo = self.repo()
+        repo.enable_hooks()
+        (repo.path / "tools/specloop").unlink()
+        repo.write("app.py", "x = 1\n")
+        out = repo.commit("code", SPEC_SYNC="off")
+        self.assertEqual(out.returncode, 0, out.output)
+
+
+class OlderInitTests(SpecloopTestCase):
+    def test_older_init_refuses_and_leaves_the_block(self):
+        repo = self.repo()
+        config = json.loads((repo.path / "specloop.json").read_text())
+        config["minVersion"] = "9.0.0"
+        repo.write("specloop.json", json.dumps(config))
+        claude = repo.path / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace(project.END, "- from a newer specloop\n" + project.END))
+        before = claude.read_text()
+        out = run_cli(repo, "init")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("older than this project's minimum 9.0.0", out.stderr)
+        self.assertEqual(claude.read_text(), before)
+
+
+class NestedFieldTests(SpecloopTestCase):
+    def test_nested_signal_fields_survive_triage_and_resolve(self):
+        repo = self.repo()
+        repo.run("signal", "add", "--source", "qa", "--summary", "slow", "--rule", "XP-1")
+        [path] = (repo.path / "docs/signals").glob("*.json")
+        record = json.loads(path.read_text())
+        record["triage"] = {"future": 1}
+        record["resolution"]["by"] = "someone"
+        path.write_text(json.dumps(record))
+        repo.run("signal", "triage", record["id"], "--layer", "spec", "--kind", "ambiguous",
+                 "--confidence", "low", "--reasoning", "r")
+        repo.run("signal", "resolve", record["id"], "--status", "wontfix")
+        record = json.loads(path.read_text())
+        self.assertEqual(record["triage"]["future"], 1)
+        self.assertEqual(record["triage"]["layer"], "spec")
+        self.assertEqual(record["resolution"]["by"], "someone")
+        self.assertEqual(record["resolution"]["status"], "wontfix")
+
+
+class PackageDataTests(unittest.TestCase):
+    def test_globs_cover_every_data_file_without_recursive_globbing(self):
+        # setuptools before 62.3 doesn't expand "**" in package-data, so each
+        # pattern has to match a file one path segment at a time.
+        import fnmatch
+        text = (HERE / "pyproject.toml").read_text()
+        patterns = re.findall(r'"(data/[^"]*)"', text.split("[tool.setuptools.package-data]")[1])
+        self.assertTrue(patterns)
+        root = HERE / "src" / "specloop"
+        for path in (root / "data").rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts:
+                rel = path.relative_to(root).parts
+                matched = any(
+                    len(p.split("/")) == len(rel) and all(fnmatch.fnmatch(a, b) for a, b in zip(rel, p.split("/")))
+                    for p in patterns
+                )
+                self.assertTrue(matched, "/".join(rel))
+
+
+class KeptDiffTests(SpecloopTestCase):
+    copied_install = UpdateTests.copied_install
+
+    def test_kept_skill_diff_shows_only_the_local_edit(self):
+        repo = self.repo()
+        self.copied_install(repo)
+        skill = repo.path / ".claude/skills/spec-triage/SKILL.md"
+        skill.write_text(skill.read_text() + "\nLocal rule.\n")
+        out = run_cli(repo, "update").stdout
+        diff = out.split("kept .claude/skills/spec-triage/SKILL.md", 1)[1].split("\nreplaced ", 1)[0]
+        changed = [l for l in diff.splitlines() if l and l[0] in "+-" and not l.startswith(("+++", "---"))]
+        self.assertEqual(changed, ["+", "+Local rule."])
+        self.assertIn("as copied", diff)

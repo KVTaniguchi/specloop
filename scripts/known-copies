@@ -5,6 +5,10 @@ this repository has ever had of each file install.sh used to copy into a
 project. `specloop update` replaces a project's file when its hash is in
 here (an unedited copy), and keeps it, with a diff, when it isn't.
 
+For the skills and hooks it also writes each version's text to
+src/specloop/data/copies/<kind>/<hash>, so that diff can be taken against
+the copy the project started from rather than today's text.
+
     scripts/known-copies          run from anywhere in the repository
 """
 
@@ -40,6 +44,13 @@ def blobs(path):
 
 
 known = {kind: sorted(set().union(*(blobs(p) for p in paths))) for kind, paths in PATHS.items()}
+copies = ROOT / DATA / "copies"
+for kind, hashes in known.items():
+    if kind in ("cli", "trigger"):
+        continue  # update never keeps these with a diff
+    (copies / kind).mkdir(parents=True, exist_ok=True)
+    for blob in hashes:
+        (copies / kind / blob).write_bytes(subprocess.run(["git", "-C", str(ROOT), "cat-file", "blob", blob], capture_output=True, check=True).stdout)
 out = ROOT / DATA / "known-copies.json"
 out.write_text(json.dumps(known, indent=1) + "\n")
 print(f"wrote {out.relative_to(ROOT)}: " + ", ".join(f"{kind} {len(v)}" for kind, v in known.items()))

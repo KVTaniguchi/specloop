@@ -1654,7 +1654,9 @@ def cmd_signal(root, config, args):
     if args.action == "triage":
         if args.kind not in LAYERS[args.layer]:
             sys.exit(f"specloop: a {args.layer} signal's kind is one of {', '.join(LAYERS[args.layer])}")
+        # Merged into what's there, so fields a newer specloop wrote survive.
         record["triage"] = {
+            **(record.get("triage") or {}),
             "layer": args.layer, "kind": args.kind, "confidence": args.confidence, "reasoning": args.reasoning,
             "confirmed_by": my_address(root) if args.confirm else None,
         }
@@ -1665,7 +1667,7 @@ def cmd_signal(root, config, args):
         record["triage"]["confirmed_by"] = my_address(root)
         word = "confirmed"
     else:  # resolve
-        record["resolution"] = {"status": args.status, "fix": args.fix or record["resolution"].get("fix")}
+        record["resolution"] = {**record["resolution"], "status": args.status, "fix": args.fix or record["resolution"].get("fix")}
         word = args.status
     save_signal(root, config, record)
     print(f"specloop: {record['id']} {word}")
@@ -1833,6 +1835,11 @@ def cmd_init(root, config, args):
         print(f"error: {target} is not a git repository", file=sys.stderr)
         return 1
     config = load_config(target)
+    gap = version_gap(config)
+    if gap:
+        # Its block and stubs would be older than the ones the project has.
+        print(f"{gap}; upgrade before running init", file=sys.stderr)
+        return 1
     changes = project.plan_init(target, config, harness(target, config))
     project.write_files(target, changes)
     report_changes(changes)
@@ -1900,6 +1907,10 @@ def cmd_update(root, config, args):
     if args.gap:
         print(f"specloop {__version__} is older than this project's minimum {config['minVersion']}; "
               f"upgrade before updating ({upgrade_command()})", file=sys.stderr)
+        return 1
+    blocked = project.edited_cli(root)
+    if blocked:
+        print(f"specloop: {blocked}", file=sys.stderr)
         return 1
     old = config.get("minVersion")
     changes = project.plan_update(root, config, harness(root, config))

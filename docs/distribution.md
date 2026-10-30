@@ -133,7 +133,7 @@ specloop's instructions for agents live between two markers:
 
 KTCatPokemon has a full copy of the CLI, the hooks and the skills. Running `specloop update` (or `init`) there:
 
-- recognizes a copied CLI or trigger (anything that isn't specloop's own shim) and replaces it with the shim
+- recognizes an unedited copy of the CLI or trigger and replaces it with the shim. If the copied CLI was edited, it changes nothing at all and says why: the new hooks and stubs need the shim, and switching them to a CLI that can't run them would block every commit
 - replaces full skill files with stubs. If a skill file was edited locally, it prints the diff against the last copied version and keeps the local file, so nothing is lost
 - adds `minVersion` to `specloop.json`, leaving every other key as it is
 - finds the section pasted from `templates/CLAUDE.md` (it has no markers yet), shows the diff, and wraps the current text in markers. Anything the project added inside that section is shown so it can be moved below the markers first

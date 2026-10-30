@@ -1,0 +1,3 @@
+#!/bin/sh
+# specloop: start /spec-sync when a commit changes the spec.
+exec "$(dirname "$0")/specloop-trigger" commit

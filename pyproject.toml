@@ -23,4 +23,4 @@ version = { attr = "specloop.__version__" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-specloop = ["data/*", "data/**/*"]
+specloop = ["data/*", "data/*/*", "data/*/*/*"]

@@ -241,11 +241,21 @@ def classify(path, rel):
     return "copy" if blob_hash(path.read_bytes()) in known.get(kind_of(rel), []) else "edited"
 
 
+def closest_copy(rel, local):
+    """The past version of this file the local one is closest to: most likely
+    the copy it was edited from. None if specloop has no texts for its kind."""
+    directory = DATA / "copies" / kind_of(rel)
+    texts = [p.read_text() for p in sorted(directory.iterdir())] if directory.is_dir() else []
+    return max(texts, key=lambda t: difflib.SequenceMatcher(None, t, local).ratio(), default=None)
+
+
 def kept_note(rel, local):
-    """Why an edited file is kept, and how it differs from specloop's version."""
-    theirs = skill_text(rel.split("/")[2]) if rel.endswith("SKILL.md") else thin_files().get(rel, "")
-    diff = unified(theirs, local, f"{rel} (specloop {__version__})", rel)
-    return f"edited here, so it's kept and won't get updates. Diff from specloop's version:\n{diff}"
+    """Why an edited file is kept, and what was changed in it."""
+    base = closest_copy(rel, local)
+    if base is None:
+        return "edited here, so it's kept and won't get updates"
+    diff = unified(base, local, f"{rel} (as copied from specloop)", rel)
+    return f"edited here, so it's kept and won't get updates. What was changed since it was copied:\n{diff}"
 
 
 def config_change(root):
@@ -286,6 +296,20 @@ def with_min_version(text, raw):
     except ValueError:
         pass
     return json.dumps({"minVersion": __version__, **{k: v for k, v in raw.items() if k != "minVersion"}}, indent=2) + "\n"
+
+
+def edited_cli(root):
+    """Why update can't go ahead, or None. Every file update writes relies on
+    tools/specloop being the shim, so an edited copy of the old CLI means
+    switching nothing until it's dealt with."""
+    path = root / "tools" / "specloop"
+    if path.exists() and classify(path, "tools/specloop") == "edited":
+        return (
+            "tools/specloop is edited here, so update changed nothing: the hooks and skill stubs it would write "
+            "need tools/specloop to be specloop's shim. Move your changes out of it (or delete it), then run "
+            "specloop update again."
+        )
+    return None
 
 
 def plan_update(root, config, harness="claude"):
