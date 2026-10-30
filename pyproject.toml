@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "specloop"
+dynamic = ["version"]
+description = "Keep a spec, the code, and the tests in lockstep, with your coding agent doing the implementation."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+
+[project.urls]
+Homepage = "https://github.com/KVTaniguchi/specloop"
+
+[project.scripts]
+specloop = "specloop.cli:main_entry"
+
+[tool.setuptools.dynamic]
+version = { attr = "specloop.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+specloop = ["data/*", "data/**/*"]

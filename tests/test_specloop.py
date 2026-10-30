@@ -112,8 +112,9 @@ class Repo:
         self.git("config", "user.email", "test@example.com")
         self.git("config", "commit.gpgsign", "false")
         (path / "tools" / "githooks").mkdir(parents=True)
-        shutil.copy(HERE / "bin" / "specloop", path / "tools" / "specloop")
-        for hook in ("specloop-trigger", "post-commit", "post-merge", "post-rewrite", "commit-msg"):
+        (path / "tools" / "specloop").symlink_to(HERE / "bin" / "specloop")
+        shutil.copy(HERE / "src" / "specloop" / "data" / "specloop-trigger", path / "tools" / "githooks" / "specloop-trigger")
+        for hook in ("post-commit", "post-merge", "post-rewrite", "commit-msg"):
             shutil.copy(HERE / "hooks" / hook, path / "tools" / "githooks" / hook)
         config = {"tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}
         if tree:

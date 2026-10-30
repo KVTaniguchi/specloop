@@ -41,7 +41,7 @@ A small project can keep one file (`"spec": "docs/SPEC.md"`). Everything below a
 
 ## Sections
 
-The overview template ([templates/spec/README.md](../templates/spec/README.md)) has product, features, cross-cutting rules, and how the spec works. Each feature doc ([templates/spec/feature.md](../templates/spec/feature.md)) has rules, then screens or interfaces. For a single-file spec, this order works for most projects:
+The overview template ([templates/spec/README.md](../src/specloop/data/templates/spec/README.md)) has product, features, cross-cutting rules, and how the spec works. Each feature doc ([templates/spec/feature.md](../src/specloop/data/templates/spec/feature.md)) has rules, then screens or interfaces. For a single-file spec, this order works for most projects:
 1. **Product:** what it is, pillars, non-goals
 2. **Rules:** logic that can be checked without UI. Aim for full test coverage here.
 3. **Screens / interfaces:** what users see and do
