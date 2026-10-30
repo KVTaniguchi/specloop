@@ -9,7 +9,7 @@ The goal: a spec that describes what the project **does today**, accurately enou
 
 ## 1. Install the plumbing
 
-If `tools/specloop` doesn't exist, run specloop's `install.sh <project-root>`, or copy the files it lists by hand. Then fill in `specloop.json`:
+If `tools/specloop` doesn't exist, run `specloop init` at the project root (install specloop first with `brew install KVTaniguchi/tap/specloop` or `pipx install specloop` if it isn't). Then fill in `specloop.json`:
 - `commands.test`: the exact command that runs the test suite
 - `tests.paths`: the test directories
 - `tests.tagStyles`: which tag styles the project's test framework uses
@@ -22,9 +22,9 @@ Read the code, not just the README: models, services and every screen or endpoin
 
 A spec is a tree of docs (the default, `"spec": "docs/spec"`), or one file for a small project (`"spec": "docs/SPEC.md"`).
 
-For a tree, start from `templates/spec/`:
+For a tree, start from the templates `specloop init` put in `docs/spec/`:
 - **`README.md` is the overview:** what the product is, its pillars and non-goals, and a link to every feature doc. Rules that cut across features go here too.
-- **One doc per feature**, from `templates/spec/feature.md`, e.g. `docs/spec/scanning.md`. A large feature can be a folder with its own `README.md` that links to its parts.
+- **One doc per feature**, from `docs/spec/feature.md`, e.g. `docs/spec/scanning.md`. A large feature can be a folder with its own `README.md` that links to its parts.
 - **Every doc must be reachable by links from the overview.** `tools/specloop check` fails on broken links and on docs nothing links to.
 
 Either way:

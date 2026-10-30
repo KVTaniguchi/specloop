@@ -1,6 +1,6 @@
 # Distribution and updates
 
-> Status: design (October 2026). Nothing here is built.
+> Status: built (October 2026), not yet released. The first release is cut with `scripts/release 0.1.0`, which prints the publishing steps.
 
 specloop reaches a project today by `install.sh` copying the CLI, the git hooks and the skills into it. Updates arrive only when someone runs the installer again and commits the result. KTCatPokemon has three commits titled "Upgrade specloop to <sha>", each re-copying the same files by hand. Nothing tells anyone an update is waiting, and the version a project runs is recorded only in a commit message.
 
@@ -165,4 +165,4 @@ These steps publish under the owner's accounts. Whether they run from a script t
 
 ## Open questions
 
-- **Is `specloop` free on PyPI?** Not checked yet. If it isn't, the package needs another name and the command stays `specloop`.
+- ~~**Is `specloop` free on PyPI?**~~ Checked 2026-10-30: it is.

@@ -52,28 +52,38 @@ spec PR ──► review ──► merge ──► git pull (or commit locally)
 
 Requirements: git, Python 3.8+ (standard library only), and a coding agent for the skills and trigger: [Claude Code](https://claude.com/claude-code), or [Cursor](https://cursor.com) with its `agent` CLI.
 
+Install specloop once per machine:
+
 ```bash
-git clone https://github.com/KVTaniguchi/specloop.git ~/specloop
-~/specloop/install.sh /path/to/your/project
+brew install KVTaniguchi/tap/specloop
 ```
 
-This copies the following into your project, without overwriting anything you already have:
+Without Homebrew, use `pipx install specloop`. Or, with no package manager, clone this repository and run `install.sh`, which links `~/.local/bin/specloop` to the checkout and sets up the project in one go.
+
+Then set it up in each project:
+
+```bash
+cd /path/to/your/project
+specloop init
+```
+
+This writes small files that run whatever specloop is installed on the machine, so upgrading specloop never leaves stale copies behind. It never overwrites a spec or config you already have:
 
 | File | Purpose |
 |---|---|
-| `tools/specloop` | CLI: `status`, `pending`, `coverage`, `check`, `mark`, `sync`, `trigger`, `config`, and for feedback `trailers`, `blame`, `signal`, `signals` |
-| `tools/githooks/` | Trigger: `post-commit`, `post-merge` and `post-rewrite` start `/spec-sync` when the spec changes. `commit-msg` checks trailers, if you turn it on |
-| `.claude/skills/spec-sync/` | Builds a pending spec diff. Cursor reads `.claude/skills/` too, so `/spec-sync` works in both. |
+| `tools/specloop` | Runs the installed CLI: `status`, `pending`, `coverage`, `check`, `mark`, `sync`, `trigger`, `config`, and for feedback `trailers`, `blame`, `signal`, `signals`. It looks in `PATH`, then Homebrew's and pipx's directories, because git GUIs run hooks with a short `PATH` |
+| `tools/githooks/` | `post-commit`, `post-merge` and `post-rewrite` start `/spec-sync` when the spec changes. `commit-msg` checks trailers, if you turn it on. A missing specloop never fails a commit |
+| `.claude/skills/spec-sync/` | Builds a pending spec diff. Cursor reads `.claude/skills/` too, so `/spec-sync` works in both. Like the other skills, it's a stub that runs `tools/specloop skill spec-sync` for the installed version's instructions |
 | `.claude/skills/spec-init/` | Drafts the first spec from existing code |
 | `.claude/skills/spec-triage/` | Traces a crash, failing test, QA report or review comment to its rules and harness, and proposes which layer to fix |
-| `specloop.json` | Spec path, test dirs and tag styles, test command |
+| `CLAUDE.md` / `AGENTS.md` | specloop's instructions for agents, between `<!-- specloop:begin -->` and `<!-- specloop:end -->` markers, followed by a "Spec sync rules for this project" section that's yours |
+| `specloop.json` | Spec path, test dirs and tag styles, test command, and `minVersion`, the oldest specloop the project relies on |
 | `docs/spec/` | Overview and feature templates, only if you don't have a spec |
 
 Then:
 1. Fill in `specloop.json`, especially `commands.test` and `tests.paths`.
-2. Paste [templates/CLAUDE.md](templates/CLAUDE.md) into your project's `CLAUDE.md` (Claude Code) or `AGENTS.md` (Cursor).
-3. In Claude Code or Cursor, run `/spec-init`. It drafts the spec from the code as it is today, tags existing tests, and records the baseline.
-4. **Enable the trigger (optional).** The hook starts background Claude Code agents that edit code on their own, so this step is a deliberate opt-in. Claude Code's safety checks may ask you to confirm. Without it, run `/spec-sync` yourself after committing a spec change.
+2. In Claude Code or Cursor, run `/spec-init`. It drafts the spec from the code as it is today, tags existing tests, and records the baseline.
+3. **Enable the trigger (optional).** The hook starts background Claude Code agents that edit code on their own, so this step is a deliberate opt-in. Claude Code's safety checks may ask you to confirm. Without it, run `/spec-sync` yourself after committing a spec change.
    ```bash
    git config core.hooksPath tools/githooks
    ```
@@ -83,10 +93,23 @@ Then:
    ```
    **Claude Code:** background sessions need two things the desktop app doesn't give the command-line `claude`: the project folder must be trusted (run `claude` in it once and accept the prompt), and the CLI must be logged in (`claude auth status`, then `claude auth login` if needed). **Cursor:** install the `agent` CLI and log in (`agent login`). The hook runs `agent -p --force --trust` in a worktree at `.specloop/worktrees/spec-sync-<sha>`, with its output in `.git/specloop/logs/<sha>.log`.
    Test the hook without launching anything with `SPEC_SYNC=dry-run git commit …`.
-5. **If GitHub squash-merges your PRs under a noreply address**, tell specloop it's you, so the trigger knows the change is yours to build:
+4. **If GitHub squash-merges your PRs under a noreply address**, tell specloop it's you, so the trigger knows the change is yours to build:
    ```bash
    git config --add specloop.email 12345+you@users.noreply.github.com
    ```
+
+## Updating
+
+```bash
+brew upgrade specloop        # or: pipx upgrade specloop
+specloop update              # in each project, then review and commit
+```
+
+Upgrading changes what runs on your machine at once: the shims find the new version, and the skills print its instructions. `specloop update` brings the project's own files along: the shims and stubs, specloop's block in `CLAUDE.md`, and `minVersion`, which it raises to the installed version so teammates know the project relies on it. It prints the release notes since the old minimum, and never commits.
+
+If your specloop is older than a project's `minVersion`, commands warn and still run, but `/spec-sync` stops and the hook doesn't start a sync, so no agent builds from older instructions than the project expects.
+
+**Moving over from a copied install:** projects set up by the old `install.sh` have full copies of the CLI, hooks and skills. `specloop update` recognizes unedited copies and replaces them with the small files. A file you edited is kept, with a diff, and `status` keeps pointing it out. The old trigger is removed, and the section pasted into `CLAUDE.md` is put between markers, leaving your "Spec sync rules for this project" alone.
 
 ## Day to day
 
@@ -114,6 +137,7 @@ Then:
 - [Writing a spec](docs/spec-format.md): the tree, IDs, good rules, tagging tests in each framework
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
 - [Attribution and feedback](docs/attribution.md): commit trailers, blame, signals and triage
+- [Distribution and updates](docs/distribution.md): installing per machine, the minimum version, and moving projects over
 - [Lessons](docs/lessons.md): what happened on a real project
 - [Measuring it](docs/measurement.md): how to tell whether the spec route pays off, and what to change if it doesn't
 - [Example: iOS / Swift](examples/ios-swift/)

@@ -495,3 +495,35 @@ class UpgradeCommandTests(unittest.TestCase):
         for path, expected in cases.items():
             self.assertEqual(cli.upgrade_command(Path(path)), expected, path)
         self.assertEqual(cli.upgrade_command(HERE / "src/specloop/cli.py"), f"git pull in {HERE}")
+
+
+class InstallScriptTests(SpecloopTestCase):
+    def install(self, home, target):
+        env = {**os.environ, "HOME": str(home), "PATH": "/usr/bin:/bin"}
+        return subprocess.run(["sh", str(HERE / "install.sh"), str(target)], env=env, capture_output=True, text=True)
+
+    def test_links_and_inits(self):
+        home = self.tmp / "home"
+        home.mkdir()
+        target = fresh_git_repo(self.tmp / "app")
+        out = self.install(home, target)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((home / ".local/bin/specloop").resolve(), (HERE / "bin/specloop").resolve())
+        self.assertIn(project.SHIM_MARKER, (target / "tools/specloop").read_text())
+        self.assertIn("isn't on your PATH", out.stdout + out.stderr)
+
+    def test_replaces_an_old_link(self):
+        home = self.tmp / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/specloop").symlink_to("/nonexistent/specloop")
+        out = self.install(home, fresh_git_repo(self.tmp / "app"))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual((home / ".local/bin/specloop").resolve(), (HERE / "bin/specloop").resolve())
+
+    def test_refuses_to_replace_a_real_file(self):
+        home = self.tmp / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/specloop").write_text("#!/bin/sh\n")
+        out = self.install(home, fresh_git_repo(self.tmp / "app"))
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual((home / ".local/bin/specloop").read_text(), "#!/bin/sh\n")
