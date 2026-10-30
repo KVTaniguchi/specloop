@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""
+Write src/specloop/data/known-copies.json: the git blob hash of every version
+this repository has ever had of each file install.sh used to copy into a
+project. `specloop update` replaces a project's file when its hash is in
+here (an unedited copy), and keeps it, with a diff, when it isn't.
+
+    scripts/known-copies          run from anywhere in the repository
+"""
+
+import json
+import subprocess
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA = "src/specloop/data"
+# Each kind of copied file, and every path it has lived at in this repository.
+PATHS = {
+    "cli": ["bin/specloop", "src/specloop/cli.py"],
+    "trigger": ["hooks/specloop-trigger", f"{DATA}/specloop-trigger"],
+    "post-commit": ["hooks/post-commit"],
+    "post-merge": ["hooks/post-merge"],
+    "post-rewrite": ["hooks/post-rewrite"],
+    "commit-msg": ["hooks/commit-msg"],
+    **{name: [f"skills/{name}/SKILL.md", f"{DATA}/skills/{name}/SKILL.md"] for name in ("spec-sync", "spec-init", "spec-triage")},
+}
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True, text=True, check=True).stdout
+
+
+def blobs(path):
+    found = set()
+    for commit in git("log", "--all", "--format=%H", "--", path).split():
+        blob = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "-q", "--verify", f"{commit}:{path}"], capture_output=True, text=True)
+        if blob.returncode == 0:
+            found.add(blob.stdout.strip())
+    return found
+
+
+known = {kind: sorted(set().union(*(blobs(p) for p in paths))) for kind, paths in PATHS.items()}
+out = ROOT / DATA / "known-copies.json"
+out.write_text(json.dumps(known, indent=1) + "\n")
+print(f"wrote {out.relative_to(ROOT)}: " + ", ".join(f"{kind} {len(v)}" for kind, v in known.items()))

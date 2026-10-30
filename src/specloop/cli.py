@@ -41,6 +41,8 @@ specloop — keep a spec, the code, and the tests in lockstep.
     specloop init [PATH]             set up a project: shims, hooks, skill stubs,
                                      specloop.json and a starter spec
     specloop skill NAME              a skill's instructions for this version
+    specloop update                  bring the project's shims, stubs, CLAUDE.md
+                                     block and minVersion to this version
     specloop version-ok              exit 1, saying so, if this specloop is older
                                      than the project's minVersion
                                      (what the stubs in .claude/skills/ run)
@@ -1848,11 +1850,7 @@ def cmd_hook(root, config, args):
     return subprocess.run(["sh", str(project.DATA / "specloop-trigger"), args.mode]).returncode
 
 
-def parse_version(text):
-    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(text).strip())
-    if not match:
-        raise ValueError(f"not a version: {text!r}")
-    return tuple(int(part) for part in match.groups())
+parse_version = project.parse_version
 
 
 def upgrade_command():
@@ -1888,6 +1886,29 @@ def cmd_version_ok(root, config, args):
     return 0
 
 
+def cmd_update(root, config, args):
+    if args.gap:
+        print(f"specloop {__version__} is older than this project's minimum {config['minVersion']}; "
+              f"upgrade before updating ({upgrade_command()})", file=sys.stderr)
+        return 1
+    old = config.get("minVersion")
+    changes = project.plan_update(root, config, harness(root, config))
+    project.write_files(root, changes)
+    if not changes:
+        print(f"Already up to date with specloop {__version__}.")
+        return 0
+    report_changes(changes)
+    try:
+        since = old if old and parse_version(old) else "0.0.0"
+    except ValueError:
+        since = "0.0.0"
+    notes = project.release_notes(since, __version__)
+    if notes:
+        print(f"\nWhat's new since {since}:\n\n{notes}")
+    print("\nReview and commit these changes.")
+    return 0
+
+
 def cmd_skill(root, config, args):
     if args.name not in project.SKILLS:
         print(f"specloop: no skill named {args.name}; there are {', '.join(project.SKILLS)}", file=sys.stderr)
@@ -1909,6 +1930,8 @@ def cmd_skill(root, config, args):
 def cmd_status(root, config, args):
     if args.gap:
         print(args.gap)
+    for path in project.forks(root):
+        print(f"fork: {path.relative_to(root)} is a local copy and doesn't get updates (specloop update shows the diff)")
     base, diff = pending_diff(root, config)
     claims = test_claims(root, config)
     defined = {i for i, _ in spec_ids(root, config)}
@@ -2024,6 +2047,7 @@ def run():
     p = sub.add_parser("hook", help="what the git hooks run")
     p.add_argument("mode", choices=sorted(set(project.HOOKS.values())))
     p.add_argument("args", nargs=argparse.REMAINDER)
+    sub.add_parser("update", help="bring the project's specloop files to this version")
     sub.add_parser("version-ok", help="exit 1, saying why, if this specloop is older than minVersion")
     p = sub.add_parser("skill", help="print a skill's instructions for this version")
     p.add_argument("name")
@@ -2033,7 +2057,7 @@ def run():
     config = load_config(root)
     # init works on another project; the rest report the gap themselves.
     args.gap = None if args.command == "init" else version_gap(config)
-    if args.gap and args.command not in ("version-ok", "skill", "status", "hook"):
+    if args.gap and args.command not in ("version-ok", "skill", "status", "hook", "update"):
         print(args.gap, file=sys.stderr)
     handler = {
         "status": cmd_status,
@@ -2054,6 +2078,7 @@ def run():
         "init": cmd_init,
         "hook": cmd_hook,
         "version-ok": cmd_version_ok,
+        "update": cmd_update,
     }[args.command]
     return handler(root, config, args)
 

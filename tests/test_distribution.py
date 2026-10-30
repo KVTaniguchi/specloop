@@ -267,3 +267,133 @@ class MinVersionTests(SpecloopTestCase):
         self.assertGreater(cli.parse_version("0.10.0"), cli.parse_version("0.9.9"))
         with self.assertRaises(ValueError):
             cli.parse_version("1.2")
+
+
+OLD = "7da7cea"  # the specloop KTCatPokemon copied in last
+
+
+def run_cli(repo, *args):
+    """This checkout's specloop, not the project's tools/specloop, which an
+    old copied install replaces."""
+    out = subprocess.run(["specloop", *args], cwd=repo.path, env=repo.env, capture_output=True, text=True)
+    out.output = out.stdout + out.stderr
+    return out
+
+
+def old_file(path):
+    return subprocess.run(["git", "-C", str(HERE), "show", f"{OLD}:{path}"], capture_output=True, text=True, check=True).stdout
+
+
+class UpdateTests(SpecloopTestCase):
+    def copied_install(self, repo):
+        """The project as install.sh left it: full copies, no markers, no minVersion."""
+        repo.write("tools/specloop", old_file("bin/specloop"))
+        for hook in ("specloop-trigger", *project.HOOKS):
+            repo.write(f"tools/githooks/{hook}", old_file(f"hooks/{hook}"))
+        for name in project.SKILLS:
+            repo.write(f".claude/skills/{name}/SKILL.md", old_file(f"skills/{name}/SKILL.md"))
+        repo.write("CLAUDE.md", "# Project\n\n" + old_file("templates/CLAUDE.md"))
+        repo.commit("copied install", SPEC_SYNC="off")
+
+    def snapshot(self, repo, paths):
+        return {p: (repo.path / p).read_bytes() for p in paths}
+
+    def test_moves_copied_install_over(self):
+        repo = self.repo()
+        self.copied_install(repo)
+        out = run_cli(repo, "update")
+        self.assertEqual(out.returncode, 0, out.output)
+        self.assertIn(project.SHIM_MARKER, (repo.path / "tools/specloop").read_text())
+        self.assertFalse((repo.path / "tools/githooks/specloop-trigger").exists())
+        for name in project.SKILLS:
+            self.assertIn(project.STUB_MARKER, (repo.path / f".claude/skills/{name}/SKILL.md").read_text())
+        claude = (repo.path / "CLAUDE.md").read_text()
+        self.assertTrue(claude.startswith("# Project\n\n" + project.BEGIN))
+        self.assertIn(project.RULES_HEADING, claude)
+        self.assertEqual(json.loads((repo.path / "specloop.json").read_text())["minVersion"], "0.1.0")
+        self.assertIn("Review and commit", out.stdout)
+
+    def test_edited_skill_is_kept_as_fork(self):
+        repo = self.repo()
+        self.copied_install(repo)
+        skill = repo.path / ".claude/skills/spec-sync/SKILL.md"
+        skill.write_text(skill.read_text() + "\nLocal rule.\n")
+        out = run_cli(repo, "update")
+        self.assertIn("Local rule.", skill.read_text())
+        self.assertIn("+Local rule.", out.stdout)  # diff from the packaged text to the local file
+        self.assertIn("fork: .claude/skills/spec-sync/SKILL.md", run_cli(repo, "status").stdout)
+
+    def test_unrecognized_cli_is_kept(self):
+        repo = self.repo()
+        repo.write("tools/specloop", "#!/bin/sh\necho mine\n")
+        out = run_cli(repo, "update")
+        self.assertEqual((repo.path / "tools/specloop").read_text(), "#!/bin/sh\necho mine\n")
+        self.assertIn("kept tools/specloop", out.stdout)
+        self.assertIn("+echo mine", out.stdout)  # diff from specloop's version to the local file
+
+    def test_older_cli_refuses_to_update(self):
+        repo = self.repo()
+        self.copied_install(repo)
+        config = json.loads((repo.path / "specloop.json").read_text())
+        config["minVersion"] = "9.0.0"
+        repo.write("specloop.json", json.dumps(config))
+        paths = ["specloop.json", "tools/specloop", "CLAUDE.md", ".claude/skills/spec-sync/SKILL.md"]
+        before = self.snapshot(repo, paths)
+        out = run_cli(repo, "update")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("upgrade before updating", out.output)
+        self.assertEqual(self.snapshot(repo, paths), before)
+
+    def test_update_is_idempotent(self):
+        repo = self.repo()
+        run_cli(repo, "update")
+        repo.commit("update", SPEC_SYNC="off")
+        run_cli(repo, "update")
+        self.assertEqual(repo.git("status", "--porcelain").stdout, "")
+
+    def test_never_touches_project_state(self):
+        repo = self.repo()
+        repo.write("docs/signals/sig-1.json", '{"id": "sig-1"}\n')
+        repo.write(".git/specloop/syncs/abc.json", '{"rev": "abc"}\n')
+        claude = repo.path / "CLAUDE.md"
+        claude.write_text("# Mine\n\n" + claude.read_text() + "\n## After\n\nkeep\n")
+        paths = ["docs/SPEC.md", "docs/.spec-implemented", "docs/signals/sig-1.json", ".git/specloop/syncs/abc.json"]
+        before = self.snapshot(repo, paths)
+        outside = project.outside_block(claude.read_text())
+        run_cli(repo, "update")
+        self.assertEqual(self.snapshot(repo, paths), before)
+        self.assertEqual(project.outside_block(claude.read_text()), outside)
+
+    def test_keeps_unknown_config_keys(self):
+        repo = self.repo()
+        config = json.loads((repo.path / "specloop.json").read_text())
+        config["futureKey"] = {"a": 1}
+        repo.write("specloop.json", json.dumps(config))
+        run_cli(repo, "update")
+        self.assertEqual(json.loads((repo.path / "specloop.json").read_text())["futureKey"], {"a": 1})
+
+    def test_release_notes_since_old_min(self):
+        self.assertIn("## 0.1.0", project.release_notes("0.0.0", "0.1.0"))
+        self.assertEqual(project.release_notes("0.1.0", "0.1.0"), "")
+
+
+class ConfigEditTests(SpecloopTestCase):
+    def test_adds_min_version_without_reformatting(self):
+        repo = self.repo()
+        text = '{\n  "spec": "docs/SPEC.md",\n  "tests": {"paths": ["tests"], "tagStyles": ["pytest"]},\n  "sync": {"require": ["XP"]}\n}\n'
+        repo.write("specloop.json", text)
+        run_cli(repo, "update")
+        self.assertEqual((repo.path / "specloop.json").read_text(), text.replace('{\n', '{\n  "minVersion": "0.1.0",\n', 1))
+
+    def test_raises_min_version_in_place(self):
+        repo = self.repo()
+        repo.write("specloop.json", '{"minVersion": "0.0.9", "tests": {"paths": ["tests"]}}\n')
+        run_cli(repo, "update")
+        self.assertEqual((repo.path / "specloop.json").read_text(), '{"minVersion": "0.1.0", "tests": {"paths": ["tests"]}}\n')
+
+    def test_one_line_config(self):
+        repo = self.repo()
+        repo.write("specloop.json", '{"tests": {"paths": ["tests"]}}\n')
+        run_cli(repo, "update")
+        config = json.loads((repo.path / "specloop.json").read_text())
+        self.assertEqual(config, {"minVersion": "0.1.0", "tests": {"paths": ["tests"]}})
