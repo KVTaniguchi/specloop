@@ -4,6 +4,7 @@ installed version. `specloop init` and `specloop update` write them; nothing
 else does.
 """
 
+import difflib
 import json
 from collections import namedtuple
 from pathlib import Path
@@ -69,7 +70,7 @@ def thin_files():
     return files
 
 
-def plan_init(root, config):
+def plan_init(root, config, harness="claude"):
     """What `specloop init` writes: the thin files where they're missing,
     specloop.json if there's none, and the starter spec if there's no spec.
     It never replaces a file that's already there."""
@@ -89,7 +90,7 @@ def plan_init(root, config):
     if not spec.endswith(".md") and not (root / spec).exists():
         for name in ("README.md", "feature.md"):
             changes.append(Change(f"{spec}/{name}", "create", "", (DATA / "templates" / "spec" / name).read_text()))
-    return changes
+    return changes + block_changes(root, harness)
 
 
 def write_files(root, changes):
@@ -103,3 +104,96 @@ def write_files(root, changes):
             path.write_text(change.text)
             if change.path.startswith(EXECUTABLE):
                 path.chmod(0o755)
+
+
+# specloop's part of CLAUDE.md / AGENTS.md sits between these markers.
+# `init` and `update` rewrite what's between them and nothing else.
+BEGIN = "<!-- specloop:begin (managed by specloop update; edits here are replaced) -->"
+END = "<!-- specloop:end -->"
+RULES_HEADING = "### Spec sync rules for this project"
+# How the section began when it was pasted in by hand, before the markers.
+PASTED_HEADING = "## Spec-driven development (specloop)"
+
+
+def block_body():
+    return (DATA / "claude-block.md").read_text()
+
+
+def render_block():
+    return f"{BEGIN}\n{block_body()}{END}\n"
+
+
+def block_span(text):
+    """(start, end, inside) of the marked block, or None."""
+    start = text.find(BEGIN)
+    end = text.find(END, start + 1) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return None
+    inside = text[start + len(BEGIN) + 1 : end]
+    end += len(END)
+    if text[end : end + 1] == "\n":
+        end += 1
+    return start, end, inside
+
+
+def pasted_span(text):
+    """(start, end) of a section pasted from the old template: from its
+    heading to the project's rules, the next `## ` heading, or the end."""
+    if text.startswith(PASTED_HEADING):
+        start = 0
+    else:
+        start = text.find("\n" + PASTED_HEADING)
+        if start < 0:
+            return None
+        start += 1
+    after = start + len(PASTED_HEADING)
+    ends = [i for i in (text.find("\n" + RULES_HEADING, after), text.find("\n## ", after)) if i >= 0]
+    return start, (min(ends) + 1 if ends else len(text))
+
+
+def unified(old, new, name):
+    lines = difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), name, f"{name} (specloop {__version__})")
+    return "".join(lines)
+
+
+def apply_block(text, name="CLAUDE.md"):
+    """(new text, diff of what it replaced). The diff is "" when the block was
+    already current, or when it was added rather than replacing anything."""
+    marked = block_span(text)
+    if marked:
+        start, end, inside = marked
+        if inside == block_body():
+            return text, ""
+        return text[:start] + render_block() + text[end:], unified(inside, block_body(), name)
+    pasted = pasted_span(text)
+    if pasted:
+        start, end = pasted
+        old = text[start:end]
+        tail = text[end:]
+        return text[:start] + render_block() + ("\n" if tail else "") + tail, unified(old, block_body(), name)
+    head = text.rstrip("\n") + "\n\n" if text.strip() else ""
+    rules = "" if RULES_HEADING in text else "\n" + (DATA / "rules-section.md").read_text()
+    return head + render_block() + rules, ""
+
+
+def outside_block(text):
+    """The project's own part of CLAUDE.md / AGENTS.md."""
+    marked = block_span(text)
+    return text[: marked[0]] + text[marked[1] :] if marked else text
+
+
+def block_targets(root, harness):
+    """The instruction files that get the block: every CLAUDE.md and AGENTS.md
+    there is, or the one the configured agent reads if there are none."""
+    present = [root / name for name in ("CLAUDE.md", "AGENTS.md") if (root / name).exists()]
+    return present or [root / ("AGENTS.md" if harness == "cursor" else "CLAUDE.md")]
+
+
+def block_changes(root, harness):
+    changes = []
+    for path in block_targets(root, harness):
+        text = path.read_text() if path.exists() else ""
+        new, diff = apply_block(text, path.name)
+        if new != text:
+            changes.append(Change(path.name, "replace" if path.exists() else "create", diff, new))
+    return changes

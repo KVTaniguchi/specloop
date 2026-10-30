@@ -1817,7 +1817,7 @@ def cmd_init(root, config, args):
         print(f"error: {target} is not a git repository", file=sys.stderr)
         return 1
     config = load_config(target)
-    changes = project.plan_init(target, config)
+    changes = project.plan_init(target, config, harness(target, config))
     project.write_files(target, changes)
     report_changes(changes)
     print(f"\nspecloop {__version__} set up in {target}\n")

@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import sys
+import unittest
 
 from test_specloop import HERE, Repo, SpecloopTestCase
 
@@ -122,3 +123,70 @@ class ShimTests(SpecloopTestCase):
         )
         self.assertEqual(out.returncode, 127)
         self.assertIn("brew install KVTaniguchi/tap/specloop", out.stderr)
+
+
+class ClaudeBlockTests(unittest.TestCase):
+    def test_appends_block_and_rules_section(self):
+        new, _ = project.apply_block("# My app\n")
+        self.assertTrue(new.startswith("# My app\n"))
+        self.assertIn(project.BEGIN, new)
+        self.assertLess(new.index(project.END), new.index(project.RULES_HEADING))
+
+    def test_keeps_an_existing_rules_section(self):
+        new, _ = project.apply_block(f"# My app\n\n{project.RULES_HEADING}\n\n- Mine.\n")
+        self.assertEqual(new.count(project.RULES_HEADING), 1)
+        self.assertIn("- Mine.", new)
+
+    def test_replaces_only_inside_markers(self):
+        text = f"top\n{project.BEGIN}\nold\n{project.END}\nbottom\n"
+        new, diff = project.apply_block(text)
+        self.assertTrue(new.startswith("top\n") and new.endswith("bottom\n"))
+        self.assertNotIn("\nold\n", new)
+        self.assertIn("-old", diff)
+
+    def test_migrates_pasted_section_keeping_project_rules(self):
+        rules = f"{project.RULES_HEADING}\n\n- Never bump the build number.\n\n## Other\n\nkeep me\n"
+        text = f"# App\n\n{project.PASTED_HEADING}\n\n- old bullet\n\n{rules}"
+        new, diff = project.apply_block(text)
+        self.assertTrue(new.endswith(rules))
+        self.assertTrue(new.startswith("# App\n\n" + project.BEGIN))
+        self.assertIn("-- old bullet", diff)
+
+    def test_pasted_section_without_rules_ends_at_next_heading(self):
+        text = f"{project.PASTED_HEADING}\n\n- old\n\n## Build\n\nmake\n"
+        new, _ = project.apply_block(text)
+        self.assertTrue(new.endswith("## Build\n\nmake\n"))
+
+    def test_unchanged_block_has_no_diff(self):
+        new, _ = project.apply_block("x\n")
+        self.assertEqual(project.apply_block(new), (new, ""))
+
+    def test_outside_block(self):
+        new, _ = project.apply_block("top\n")
+        self.assertNotIn(project.BEGIN, project.outside_block(new))
+        self.assertTrue(project.outside_block(new).startswith("top\n"))
+
+
+class InitBlockTests(SpecloopTestCase):
+    def test_init_creates_claude_md(self):
+        path = fresh_git_repo(self.tmp / "new")
+        subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, check=True)
+        self.assertIn(project.BEGIN, (path / "CLAUDE.md").read_text())
+        self.assertFalse((path / "AGENTS.md").exists())
+
+    def test_init_for_cursor_creates_agents_md(self):
+        path = fresh_git_repo(self.tmp / "new")
+        subprocess.run(["git", "-C", str(path), "config", "specloop.harness", "cursor"], check=True)
+        subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, check=True)
+        self.assertIn(project.BEGIN, (path / "AGENTS.md").read_text())
+        self.assertFalse((path / "CLAUDE.md").exists())
+
+    def test_init_adds_block_to_both_when_both_exist(self):
+        path = fresh_git_repo(self.tmp / "both")
+        (path / "CLAUDE.md").write_text("# C\n")
+        (path / "AGENTS.md").write_text("# A\n")
+        subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, check=True)
+        for name, title in (("CLAUDE.md", "# C\n"), ("AGENTS.md", "# A\n")):
+            text = (path / name).read_text()
+            self.assertTrue(text.startswith(title))
+            self.assertIn(project.BEGIN, text)
