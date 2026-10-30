@@ -41,6 +41,10 @@ if [ "$mode" = commit ] && { [ -d "$git_dir/rebase-merge" ] || [ -d "$git_dir/re
 fi
 case "$(git rev-parse --abbrev-ref HEAD)" in "$prefix"*) exit 0 ;; esac
 
+# A specloop older than the project's minimum doesn't start a sync: the
+# session would build from older instructions. The commit still goes through.
+"$specloop" version-ok || exit 0
+
 # Clear out worktrees of syncs that are merged or whose session died.
 if [ "$SPEC_SYNC" = "dry-run" ]; then
     "$specloop" cleanup --dry-run

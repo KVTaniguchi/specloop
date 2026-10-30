@@ -190,3 +190,80 @@ class InitBlockTests(SpecloopTestCase):
             text = (path / name).read_text()
             self.assertTrue(text.startswith(title))
             self.assertIn(project.BEGIN, text)
+
+
+class MinVersionTests(SpecloopTestCase):
+    def set_min(self, repo, value="9.0.0"):
+        config = json.loads((repo.path / "specloop.json").read_text())
+        if value is None:
+            config.pop("minVersion", None)
+        else:
+            config["minVersion"] = value
+        repo.write("specloop.json", json.dumps(config))
+        repo.commit("min", SPEC_SYNC="off")
+
+    def test_commands_warn_and_run(self):
+        repo = self.repo()
+        self.set_min(repo)
+        out = repo.run("coverage")
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("specloop 0.1.0 is older than this project's minimum 9.0.0", out.stderr)
+
+    def test_status_leads_with_gap(self):
+        repo = self.repo()
+        self.set_min(repo)
+        self.assertTrue(repo.run("status").stdout.startswith("specloop 0.1.0 is older than this project's minimum 9.0.0"))
+
+    def test_spec_sync_skill_stops(self):
+        repo = self.repo()
+        self.set_min(repo)
+        out = repo.run("skill", "spec-sync")
+        self.assertEqual(out.returncode, 1)
+        self.assertNotIn("# Spec sync", out.stdout)
+        self.assertIn('tools/specloop sync blocked --note "specloop 0.1.0 < 9.0.0;', out.stdout)
+
+    def test_other_skills_warn_and_run(self):
+        repo = self.repo()
+        self.set_min(repo)
+        out = repo.run("skill", "spec-triage")
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("# Spec triage", out.stdout)
+        self.assertIn("older than", out.stderr)
+
+    def test_hook_starts_nothing_and_commit_succeeds(self):
+        repo = self.repo()
+        self.set_min(repo)
+        repo.enable_hooks()
+        repo.change_spec()
+        out = repo.commit("raise scan XP")
+        self.assertEqual(out.returncode, 0)
+        self.assertIn("older than this project's minimum", out.output)
+        self.assertEqual(repo.claude_calls(), [])
+        self.assertEqual(repo.syncs(), [])
+
+    def test_blocked_status_names_versions(self):
+        repo = self.repo()
+        repo.spec_change()
+        repo.run("sync", "blocked", "--note", "specloop 0.1.0 < 9.0.0; brew upgrade specloop")
+        self.assertIn("blocked: specloop 0.1.0 < 9.0.0", repo.run("status").stdout)
+
+    def test_equal_or_missing_min_no_warning(self):
+        repo = self.repo()
+        self.set_min(repo, "0.1.0")
+        self.assertNotIn("older", repo.run("coverage").stderr)
+        self.set_min(repo, None)
+        self.assertNotIn("older", repo.run("coverage").stderr)
+
+    def test_malformed_min_warns_once(self):
+        repo = self.repo()
+        self.set_min(repo, "soon")
+        out = repo.run("coverage")
+        self.assertEqual(out.returncode, 0)
+        self.assertEqual(out.stderr.count('minVersion "soon" in specloop.json isn\'t a version like 0.3.0'), 1)
+
+    def test_parse_version(self):
+        from specloop import cli
+        self.assertEqual(cli.parse_version("0.10.2"), (0, 10, 2))
+        self.assertGreater(cli.parse_version("0.10.0"), cli.parse_version("0.9.9"))
+        with self.assertRaises(ValueError):
+            cli.parse_version("1.2")

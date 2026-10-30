@@ -41,6 +41,8 @@ specloop — keep a spec, the code, and the tests in lockstep.
     specloop init [PATH]             set up a project: shims, hooks, skill stubs,
                                      specloop.json and a starter spec
     specloop skill NAME              a skill's instructions for this version
+    specloop version-ok              exit 1, saying so, if this specloop is older
+                                     than the project's minVersion
                                      (what the stubs in .claude/skills/ run)
 
 Configuration lives in specloop.json at the project root (found by walking up
@@ -631,6 +633,10 @@ def describe_sync(root, config, record, branch):
             return "merged", f"{branch} is merged but the ledger wasn't advanced; run specloop mark"
         return "awaiting review", f"on {branch}, finished {when}"
     if status == "blocked":
+        if note and note.startswith("specloop ") and " < " in note:
+            # Stopped because this machine's specloop is older than the project's minimum.
+            reason, _, fix = note.partition(";")
+            return f"blocked: {reason}", fix.strip() or "upgrade specloop, then run /spec-sync"
         return "blocked", note or "stopped with questions about the spec"
     return "failed", note or "the sync reported a failure"
 
@@ -1842,16 +1848,67 @@ def cmd_hook(root, config, args):
     return subprocess.run(["sh", str(project.DATA / "specloop-trigger"), args.mode]).returncode
 
 
+def parse_version(text):
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", str(text).strip())
+    if not match:
+        raise ValueError(f"not a version: {text!r}")
+    return tuple(int(part) for part in match.groups())
+
+
+def upgrade_command():
+    """How this copy of specloop is upgraded, from where it's installed."""
+    here = Path(__file__).resolve()
+    if "/Cellar/" in str(here):
+        return "brew upgrade specloop"
+    if "/pipx/" in str(here):
+        return "pipx upgrade specloop"
+    return f"git pull in {here.parents[2]}"
+
+
+def version_gap(config):
+    """The warning when this specloop is older than the project's minVersion,
+    or None. A minVersion that isn't a version is reported and ignored."""
+    wanted = config.get("minVersion")
+    if not wanted:
+        return None
+    try:
+        minimum = parse_version(wanted)
+    except ValueError:
+        print(f'specloop: minVersion "{wanted}" in specloop.json isn\'t a version like 0.3.0; ignoring it', file=sys.stderr)
+        return None
+    if parse_version(__version__) >= minimum:
+        return None
+    return f"specloop {__version__} is older than this project's minimum {wanted}; upgrade with {upgrade_command()}"
+
+
+def cmd_version_ok(root, config, args):
+    if args.gap:
+        print(args.gap)
+        return 1
+    return 0
+
+
 def cmd_skill(root, config, args):
     if args.name not in project.SKILLS:
         print(f"specloop: no skill named {args.name}; there are {', '.join(project.SKILLS)}", file=sys.stderr)
         return 2
+    if args.gap and args.name == "spec-sync":
+        # People get a warning; an agent doesn't build code from instructions
+        # older than the project relies on.
+        print(args.gap)
+        print("Don't build anything. Record this sync as blocked and stop:\n")
+        print(f'    tools/specloop sync blocked --note "specloop {__version__} < {config["minVersion"]}; {upgrade_command()}"')
+        return 1
+    if args.gap:
+        print(args.gap, file=sys.stderr)
     print(f"<!-- specloop {__version__} -->")
     print(project.skill_text(args.name), end="")
     return 0
 
 
 def cmd_status(root, config, args):
+    if args.gap:
+        print(args.gap)
     base, diff = pending_diff(root, config)
     claims = test_claims(root, config)
     defined = {i for i, _ in spec_ids(root, config)}
@@ -1967,12 +2024,17 @@ def run():
     p = sub.add_parser("hook", help="what the git hooks run")
     p.add_argument("mode", choices=sorted(set(project.HOOKS.values())))
     p.add_argument("args", nargs=argparse.REMAINDER)
+    sub.add_parser("version-ok", help="exit 1, saying why, if this specloop is older than minVersion")
     p = sub.add_parser("skill", help="print a skill's instructions for this version")
     p.add_argument("name")
     args = parser.parse_args()
 
     root = find_root()
     config = load_config(root)
+    # init works on another project; the rest report the gap themselves.
+    args.gap = None if args.command == "init" else version_gap(config)
+    if args.gap and args.command not in ("version-ok", "skill", "status", "hook"):
+        print(args.gap, file=sys.stderr)
     handler = {
         "status": cmd_status,
         "pending": cmd_pending,
@@ -1991,6 +2053,7 @@ def run():
         "skill": cmd_skill,
         "init": cmd_init,
         "hook": cmd_hook,
+        "version-ok": cmd_version_ok,
     }[args.command]
     return handler(root, config, args)
 
