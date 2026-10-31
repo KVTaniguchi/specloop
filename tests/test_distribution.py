@@ -19,7 +19,7 @@ from test_specloop import HERE, Repo, SpecloopTestCase
 
 sys.path.insert(0, str(HERE / "src"))
 
-from specloop import project  # noqa: E402
+from specloop import project, __version__ as VERSION  # noqa: E402
 
 DATA = HERE / "src" / "specloop" / "data"
 
@@ -27,7 +27,7 @@ DATA = HERE / "src" / "specloop" / "data"
 class VersionTests(SpecloopTestCase):
     def test_version(self):
         out = subprocess.run([str(HERE / "bin" / "specloop"), "--version"], capture_output=True, text=True)
-        self.assertEqual(out.stdout.strip(), "specloop 0.1.0")
+        self.assertEqual(out.stdout.strip(), f"specloop {VERSION}")
 
     def test_package_data_present(self):
         for rel in ("skills/spec-sync/SKILL.md", "specloop-trigger", "claude-block.md", "templates/specloop.json"):
@@ -38,7 +38,7 @@ class SkillTests(SpecloopTestCase):
     def test_skill_prints_versioned_text(self):
         out = self.repo().run("skill", "spec-sync")
         self.assertEqual(out.returncode, 0)
-        self.assertTrue(out.stdout.startswith("<!-- specloop 0.1.0 -->\n"))
+        self.assertTrue(out.stdout.startswith(f"<!-- specloop {VERSION} -->\n"))
         self.assertIn("# Spec sync", out.stdout)
 
     def test_unknown_skill(self):
@@ -82,7 +82,7 @@ class ShimTests(SpecloopTestCase):
         path = fresh_git_repo(self.tmp / "new")
         out = subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, text=True)
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertEqual(json.loads((path / "specloop.json").read_text())["minVersion"], "0.1.0")
+        self.assertEqual(json.loads((path / "specloop.json").read_text())["minVersion"], VERSION)
         self.assertTrue((path / "docs/spec/README.md").is_file())
         self.assertIn("core.hooksPath tools/githooks", out.stdout)
 
@@ -218,12 +218,12 @@ class MinVersionTests(SpecloopTestCase):
         self.set_min(repo)
         out = repo.run("coverage")
         self.assertEqual(out.returncode, 0)
-        self.assertIn("specloop 0.1.0 is older than this project's minimum 9.0.0", out.stderr)
+        self.assertIn(f"specloop {VERSION} is older than this project's minimum 9.0.0", out.stderr)
 
     def test_status_leads_with_gap(self):
         repo = self.repo()
         self.set_min(repo)
-        self.assertTrue(repo.run("status").stdout.startswith("specloop 0.1.0 is older than this project's minimum 9.0.0"))
+        self.assertTrue(repo.run("status").stdout.startswith(f"specloop {VERSION} is older than this project's minimum 9.0.0"))
 
     def test_spec_sync_skill_stops(self):
         repo = self.repo()
@@ -231,7 +231,7 @@ class MinVersionTests(SpecloopTestCase):
         out = repo.run("skill", "spec-sync")
         self.assertEqual(out.returncode, 1)
         self.assertNotIn("# Spec sync", out.stdout)
-        self.assertIn('tools/specloop sync blocked --note "specloop 0.1.0 < 9.0.0;', out.stdout)
+        self.assertIn(f'tools/specloop sync blocked --note "specloop {VERSION} < 9.0.0;', out.stdout)
 
     def test_other_skills_warn_and_run(self):
         repo = self.repo()
@@ -321,7 +321,7 @@ class UpdateTests(SpecloopTestCase):
         claude = (repo.path / "CLAUDE.md").read_text()
         self.assertTrue(claude.startswith("# Project\n\n" + project.BEGIN))
         self.assertIn(project.RULES_HEADING, claude)
-        self.assertEqual(json.loads((repo.path / "specloop.json").read_text())["minVersion"], "0.1.0")
+        self.assertEqual(json.loads((repo.path / "specloop.json").read_text())["minVersion"], VERSION)
         self.assertIn("Review and commit", out.stdout)
 
     def test_edited_skill_is_kept_as_fork(self):
@@ -394,20 +394,20 @@ class ConfigEditTests(SpecloopTestCase):
         text = '{\n  "spec": "docs/SPEC.md",\n  "tests": {"paths": ["tests"], "tagStyles": ["pytest"]},\n  "sync": {"require": ["XP"]}\n}\n'
         repo.write("specloop.json", text)
         run_cli(repo, "update")
-        self.assertEqual((repo.path / "specloop.json").read_text(), text.replace('{\n', '{\n  "minVersion": "0.1.0",\n', 1))
+        self.assertEqual((repo.path / "specloop.json").read_text(), text.replace('{\n', '{\n  "minVersion": "%s",\n' % VERSION, 1))
 
     def test_raises_min_version_in_place(self):
         repo = self.repo()
         repo.write("specloop.json", '{"minVersion": "0.0.9", "tests": {"paths": ["tests"]}}\n')
         run_cli(repo, "update")
-        self.assertEqual((repo.path / "specloop.json").read_text(), '{"minVersion": "0.1.0", "tests": {"paths": ["tests"]}}\n')
+        self.assertEqual((repo.path / "specloop.json").read_text(), '{"minVersion": "%s", "tests": {"paths": ["tests"]}}\n' % VERSION)
 
     def test_one_line_config(self):
         repo = self.repo()
         repo.write("specloop.json", '{"tests": {"paths": ["tests"]}}\n')
         run_cli(repo, "update")
         config = json.loads((repo.path / "specloop.json").read_text())
-        self.assertEqual(config, {"minVersion": "0.1.0", "tests": {"paths": ["tests"]}})
+        self.assertEqual(config, {"minVersion": VERSION, "tests": {"paths": ["tests"]}})
 
 
 def harness_rev(repo):
@@ -418,7 +418,7 @@ def harness_rev(repo):
 class HarnessRevTests(SpecloopTestCase):
     def test_names_version_and_not_the_stub(self):
         rev = harness_rev(self.repo())
-        self.assertTrue(rev.startswith("specloop@0.1.0 "), rev)
+        self.assertTrue(rev.startswith(f"specloop@{VERSION} "), rev)
         self.assertNotIn("spec-sync@", rev)
         self.assertRegex(rev, r"claude-md@[0-9a-f]{6}$")
 
@@ -434,7 +434,7 @@ class HarnessRevTests(SpecloopTestCase):
     def test_fork_is_named(self):
         repo = self.repo()
         repo.write(".claude/skills/spec-sync/SKILL.md", project.skill_text("spec-sync"))
-        self.assertRegex(harness_rev(repo), r"^specloop@0\.1\.0 spec-sync@[0-9a-f]{6} ")
+        self.assertRegex(harness_rev(repo), r"^specloop@%s spec-sync@[0-9a-f]{6} " % re.escape(VERSION))
 
 
 class ToleranceTests(SpecloopTestCase):
