@@ -1,0 +1,15 @@
+{
+  "rev": "4fce1bf5027d0da60ba9c84812a155dcc0c3c44d",
+  "started": "2026-10-31T13:50:27+00:00",
+  "branch": "spec-sync/4fce1bf",
+  "base": "ac197b32d058bce670194514b4e1bbf4884f82b7",
+  "status": "done",
+  "note": "",
+  "updated": "2026-10-31T13:50:28+00:00",
+  "finished": "2026-10-31T13:50:28+00:00",
+  "built": "b45f5a53084746c5eb8f3204289423dcb17bb920",
+  "branchTip": "b45f5a53084746c5eb8f3204289423dcb17bb920",
+  "branchMerged": true,
+  "ledger": "4fce1bf5027d0da60ba9c84812a155dcc0c3c44d",
+  "archived": "2026-10-31T13:50:28+00:00"
+}
