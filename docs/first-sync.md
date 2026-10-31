@@ -69,6 +69,14 @@ git config core.hooksPath tools/githooks
 
 Background sessions need the command-line `claude` to be logged in (`claude auth status`, then `claude auth login` if needed) and the project folder to be trusted (run `claude` in it once and accept the prompt). For Cursor, run `git config specloop.harness cursor` and log in with `agent login`.
 
+Then check the whole setup:
+
+```bash
+tools/specloop doctor
+```
+
+It prints a line per check (config, tests, spec, ledger, the project's specloop files, the trigger, the claude CLI's login and folder trust) and the fix for anything that's wrong.
+
 ## 5. Try it as a dry run
 
 Change one rule in the spec, for example a value in a table, and commit with the trigger in dry-run mode:

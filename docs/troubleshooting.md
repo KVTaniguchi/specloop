@@ -1,6 +1,11 @@
 # Troubleshooting
 
-Start with `tools/specloop status`. It lists every spec revision the code doesn't match yet, with the state of its sync and what to do next. Most problems below show up there first.
+Start with two commands:
+
+- `tools/specloop doctor` checks the setup: `specloop.json`, the test paths, the project's specloop files, the trigger, whether the agent's CLI is installed and logged in, and whether Claude Code trusts the folder. Each problem comes with its fix, and it exits 1 if any of them stops syncs from working.
+- `tools/specloop status` lists every spec revision the code doesn't match yet, with the state of its sync and what to do next.
+
+Most problems below show up in one of them first.
 
 ## A spec commit didn't start a sync
 
