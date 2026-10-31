@@ -63,6 +63,12 @@ def minimal_env(repo, home):
     return {"PATH": "/usr/bin:/bin", "HOME": str(home)}
 
 
+# The shim looks in these after PATH, so a specloop installed there is found
+# even by a test that means to have none.
+INSTALLED = [d for d in ("/opt/homebrew/bin", "/usr/local/bin") if os.path.exists(d + "/specloop")]
+no_installed_cli = unittest.skipIf(INSTALLED, "specloop is installed in %s" % ", ".join(INSTALLED))
+
+
 class ShimTests(SpecloopTestCase):
     def test_init_writes_thin_files(self):
         repo = self.repo()  # Repo runs init
@@ -108,6 +114,7 @@ class ShimTests(SpecloopTestCase):
         # The trigger ran: it got as far as looking for claude, which isn't on this PATH.
         self.assertIn("claude CLI not found", out)
 
+    @no_installed_cli
     def test_commit_succeeds_without_cli(self):
         repo = self.repo()
         repo.enable_hooks()
@@ -118,6 +125,7 @@ class ShimTests(SpecloopTestCase):
         self.assertIn("not installed", out.output)
         self.assertIn("skipping", out.output)
 
+    @no_installed_cli
     def test_direct_shim_call_without_cli_fails(self):
         repo = self.repo()
         out = subprocess.run(

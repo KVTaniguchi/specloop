@@ -58,7 +58,7 @@ Install specloop once per machine:
 brew install KVTaniguchi/tap/specloop
 ```
 
-Without Homebrew, use `pipx install specloop`. Or, with no package manager, clone this repository and run `install.sh`, which links `~/.local/bin/specloop` to the checkout and sets up the project in one go.
+Without Homebrew, clone this repository and run `install.sh`, which links `~/.local/bin/specloop` to the checkout and sets up the project in one go.
 
 Then set it up in each project:
 
@@ -101,7 +101,7 @@ Then:
 ## Updating
 
 ```bash
-brew upgrade specloop        # or: pipx upgrade specloop
+brew upgrade specloop        # or: git pull, for an install.sh checkout
 specloop update              # in each project, then review and commit
 ```
 

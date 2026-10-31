@@ -12,7 +12,8 @@ runs:
       working-directory: ${{ inputs.working-directory }}
       run: |
         # Exactly minVersion, so a gating check changes only when a project
-        # commit changes the minimum. Without one, the latest release.
+        # commit changes the minimum. Without one, the version this action is.
+        # Installs from the release tag on GitHub, not PyPI.
         v=$(python3 -c 'import json; print(json.load(open("specloop.json")).get("minVersion", ""))')
-        if [ -n "$v" ]; then pipx install "specloop==$v"; else pipx install specloop; fi
+        if [ -n "$v" ]; then pipx install "git+https://github.com/KVTaniguchi/specloop@v$v"; else pipx install "$GITHUB_ACTION_PATH"; fi
         specloop --version
