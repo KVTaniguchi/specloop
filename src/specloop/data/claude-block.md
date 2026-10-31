@@ -1,8 +1,8 @@
 ## Spec-driven development (specloop)
 
-- **The spec in `docs/spec/` is the source of truth** for what this project does. `docs/spec/README.md` is the overview and links to one doc per feature. Read the overview and the relevant feature docs before changing behavior.
-- **Behavior changes start as spec changes**, normally a pull request against `docs/spec/`. Once it's merged and pulled, the specloop hook starts `/spec-sync` as a background session in its own worktree, on the machine of the person who wrote the spec change. Enable it per clone with `git config core.hooksPath tools/githooks`, and pick your agent with `git config specloop.harness claude` (or `cursor`). To skip it once, use `SPEC_SYNC=off`. `tools/specloop status` shows where each pending spec revision stands.
-- `docs/.spec-implemented` holds the commit whose spec the code matches. Only `/spec-sync` advances it, or `tools/specloop mark` after a hand-made spec+code commit.
+- {source}
+- **Behavior changes start as spec changes**, normally a pull request against `{spec}`. Once it's merged and pulled, the specloop hook starts `/spec-sync` as a background session in its own worktree, on the machine of the person who wrote the spec change. Enable it per clone with `git config core.hooksPath tools/githooks`, and pick your agent with `git config specloop.harness claude` (or `cursor`). To skip it once, use `SPEC_SYNC=off`. `tools/specloop status` shows where each pending spec revision stands.
+- `{ledger}` holds the commit whose spec the code matches. Only `/spec-sync` advances it, or `tools/specloop mark` after a hand-made spec+code commit.
 - Tests name the spec IDs they check at the start of their name, e.g. `@Test("XP-6: …")`. `tools/specloop coverage` reports which IDs have tests and fails on IDs the spec doesn't define.
 - Any direct code change that alters behavior must update the spec in the same commit.
 - **Every commit that changes code names its rules in trailers.** `tools/specloop trailers --rules ID,... --human` prints the block for a hand-written commit (or `--model <id>` instead of `--human` for an agent session); paste it at the end of the message. A commit no rule covers says why: `Spec-Rules: none (deps)`. Use `none (format)`, `none (rename)` or `none (move)` for changes that only move code, so `specloop blame` looks past them.

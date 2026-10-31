@@ -86,13 +86,13 @@ def plan_init(root, config, harness="claude"):
     if not (root / "specloop.json").exists():
         template = json.loads((DATA / "templates" / "specloop.json").read_text())
         changes.append(Change("specloop.json", "create", "", json.dumps({"minVersion": __version__, **template}, indent=2) + "\n"))
-        spec = template["spec"]
+        spec, ledger = template["spec"], template["ledger"]
     else:
-        spec = config["spec"]
+        spec, ledger = config["spec"], config["ledger"]
     if not spec.endswith(".md") and not (root / spec).exists():
         for name in ("README.md", "feature.md"):
             changes.append(Change(f"{spec}/{name}", "create", "", (DATA / "templates" / "spec" / name).read_text()))
-    return changes + block_changes(root, harness)
+    return changes + block_changes(root, harness, {"spec": spec, "ledger": ledger})
 
 
 def write_files(root, changes):
@@ -115,14 +115,51 @@ END = "<!-- specloop:end -->"
 RULES_HEADING = "### Spec sync rules for this project"
 # How the section began when it was pasted in by hand, before the markers.
 PASTED_HEADING = "## Spec-driven development (specloop)"
+# Where `update` puts the lines of a pasted section the project wrote itself.
+KEPT_HEADING = "### Kept from the old specloop section"
+# How close an old line must be to some version of the template to count as
+# specloop's wording rather than the project's. Older wordings score 0.88 and
+# up; a project's own instruction scores well under 0.5.
+TEMPLATE_LIKENESS = 0.8
 
 
-def block_body():
-    return (DATA / "claude-block.md").read_text()
+def block_body(config=None):
+    """specloop's part of CLAUDE.md / AGENTS.md, for this project's spec
+    layout: one file or a tree, and where the ledger is."""
+    config = config or {}
+    spec, ledger = config.get("spec", "docs/spec"), config.get("ledger", "docs/.spec-implemented")
+    if spec.endswith(".md"):
+        source = f"**`{spec}` is the source of truth** for what this project does. Read it before changing behavior."
+    else:
+        spec = spec.rstrip("/") + "/"
+        source = (f"**The spec in `{spec}` is the source of truth** for what this project does. `{spec}README.md` is the "
+                  "overview and links to one doc per feature. Read the overview and the relevant feature docs before changing behavior.")
+    return (DATA / "claude-block.md").read_text().replace("{source}", source).replace("{spec}", spec).replace("{ledger}", ledger)
 
 
-def render_block():
-    return f"{BEGIN}\n{block_body()}{END}\n"
+def render_block(config=None):
+    return f"{BEGIN}\n{block_body(config)}{END}\n"
+
+
+def template_lines():
+    """Every line the pasted template and the managed block have had."""
+    texts = [p.read_text() for p in sorted((DATA / "copies" / "claude-md-template").glob("*"))]
+    texts += [block_body(), block_body({"spec": "docs/SPEC.md"})]
+    return {line.strip() for text in texts for line in text.splitlines() if line.strip()}
+
+
+def own_lines(section):
+    """The lines of an old pasted section that the project wrote itself, not
+    any version of specloop's template."""
+    known = template_lines()
+
+    def specloops(line):
+        return line in known or any(difflib.SequenceMatcher(None, line, k).ratio() >= TEMPLATE_LIKENESS for k in known)
+
+    return [
+        line for line in section.splitlines()
+        if line.strip() and line.strip() != PASTED_HEADING and not line.startswith("<!--") and not specloops(line.strip())
+    ]
 
 
 def block_span(text):
@@ -157,24 +194,31 @@ def unified(old, new, old_label, new_label):
     return "".join(difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), old_label, new_label))
 
 
-def apply_block(text, name="CLAUDE.md"):
+def apply_block(text, name="CLAUDE.md", config=None):
     """(new text, diff of what it replaced). The diff is "" when the block was
-    already current, or when it was added rather than replacing anything."""
+    already current, or when it was added rather than replacing anything.
+    Lines a project added to a section pasted by hand are kept, under their
+    own heading after the block."""
+    body = block_body(config)
+    label = f"{name} (specloop {__version__})"
     marked = block_span(text)
     if marked:
         start, end, inside = marked
-        if inside == block_body():
+        if inside == body:
             return text, ""
-        return text[:start] + render_block() + text[end:], unified(inside, block_body(), name, f"{name} (specloop {__version__})")
+        return text[:start] + render_block(config) + text[end:], unified(inside, body, name, label)
     pasted = pasted_span(text)
     if pasted:
         start, end = pasted
         old = text[start:end]
         tail = text[end:]
-        return text[:start] + render_block() + ("\n" if tail else "") + tail, unified(old, block_body(), name, f"{name} (specloop {__version__})")
+        kept = own_lines(old)
+        keep = f"\n{KEPT_HEADING}\n\n" + "\n".join(kept) + "\n" if kept else ""
+        note = f"kept {len(kept)} line{'s' * (len(kept) != 1)} this project wrote, under \"{KEPT_HEADING}\"\n" if kept else ""
+        return text[:start] + render_block(config) + keep + ("\n" if tail else "") + tail, unified(old, body, name, label) + note
     head = text.rstrip("\n") + "\n\n" if text.strip() else ""
     rules = "" if RULES_HEADING in text else "\n" + (DATA / "rules-section.md").read_text()
-    return head + render_block() + rules, ""
+    return head + render_block(config) + rules, ""
 
 
 def outside_block(text):
@@ -190,11 +234,11 @@ def block_targets(root, harness):
     return present or [root / ("AGENTS.md" if harness == "cursor" else "CLAUDE.md")]
 
 
-def block_changes(root, harness):
+def block_changes(root, harness, config=None):
     changes = []
     for path in block_targets(root, harness):
         text = path.read_text() if path.exists() else ""
-        new, diff = apply_block(text, path.name)
+        new, diff = apply_block(text, path.name, config)
         if new != text:
             changes.append(Change(path.name, "replace" if path.exists() else "create", diff, new))
     return changes
@@ -333,7 +377,7 @@ def plan_update(root, config, harness="claude"):
             changes.append(Change(TRIGGER, "delete", "the trigger now ships with specloop"))
         else:
             changes.append(Change(TRIGGER, "keep", "edited here; the hooks no longer run it, so it can be removed"))
-    changes += block_changes(root, harness)
+    changes += block_changes(root, harness, config)
     config_update = config_change(root)
     return changes + ([config_update] if config_update else [])
 

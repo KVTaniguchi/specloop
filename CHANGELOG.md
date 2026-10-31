@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.3
+
+- specloop's block in `CLAUDE.md` / `AGENTS.md` names the project's own spec: one file such as `docs/SPEC.md`, or a tree, and the ledger's path. It always said `docs/spec/` before. Run `specloop update` in a single-file project to fix its block.
+- When `specloop update` moves a section pasted by hand into the managed block, it keeps the lines the project wrote itself, under "Kept from the old specloop section", instead of replacing them. It says how many it kept.
+- Issue templates ask for `specloop doctor` and `specloop status` output.
+
 ## 0.1.2
 
 - `specloop doctor` checks a project's setup: the installed version against `minVersion`, `specloop.json` and its test command, the test paths, the spec and ledger, the project's specloop files, the trigger, whether git GUIs can find specloop, the agent CLI's login, Claude Code's folder trust, and leftover sync worktrees. Each problem comes with its fix; it exits 1 when one stops syncs from working.
