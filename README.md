@@ -1,5 +1,9 @@
 # specloop
 
+[![test](https://github.com/KVTaniguchi/specloop/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/KVTaniguchi/specloop/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/KVTaniguchi/specloop)](https://github.com/KVTaniguchi/specloop/releases)
+[![license](https://img.shields.io/github/license/KVTaniguchi/specloop)](LICENSE)
+
 **Keep an iOS app's spec, its code and its tests in lockstep, with Claude Code or Cursor doing the implementation.**
 
 ![A spec change to the iOS example: the commit hook queues a sync, and status shows XP-1 pending](docs/demo.gif)
@@ -7,6 +11,30 @@
 *The [iOS example](examples/ios-swift/), with the trigger in dry-run mode. A real commit starts a background Claude Code session that builds XP-1 on a review branch.*
 
 **Spec drift** is what happens once a coding agent writes most of your app: the code moves fast, the spec stops describing it, and soon nobody can say which rules the code actually follows. specloop stops the drift.
+
+In plain terms: you write down how your app should behave, in ordinary Markdown. When you change that description, an AI coding agent updates the code and tests to match, and hands you the result to review. specloop keeps track of which version of the description the code matches, so the two can't quietly fall apart.
+
+| Building a house | specloop |
+|---|---|
+| The blueprint | The spec: Markdown docs in `docs/spec/`, one bold ID per rule |
+| A change order | A pull request against the spec |
+| The contractor | A background Claude Code or Cursor agent |
+| The work, waiting for your walkthrough | The `spec-sync/<sha>` review branch |
+| The inspection checklist | Tests tagged with rule IDs, and `specloop coverage` |
+| The signed-off inspection | The ledger, `docs/.spec-implemented`: the spec revision the code matches |
+
+## Highlights
+
+- **Built for iOS.** Swift Testing and XCTest tags, your `xcodebuild` test command, and a worked [iOS example](examples/ios-swift/).
+- **Your spec, your shape.** Plain Markdown in git, organized however you like. specloop only needs bold rule IDs.
+- **Starts from the app you have.** `/spec-init` drafts the spec from your existing code and tags the tests you already have.
+- **Builds in the background.** A spec change starts an agent in its own worktree, on a branch for you to review. Your checkout isn't touched.
+- **Every rule has a test, or you know it doesn't.** `specloop coverage` maps rules to tests, and `specloop check` fails CI when the spec and the code drift apart.
+- **Traceable.** Every commit names the rules it built, so `specloop blame` and `/spec-triage` take a crash or failing test back to its rule.
+- **Safe for teams.** By default only the author of a spec change builds it, so nobody's agent duplicates anyone else's work.
+- **No telemetry.** specloop makes no network calls. One `brew install`, and `specloop update` keeps projects current.
+
+## A rule and its test
 
 Your app's behavior is described by a tree of Markdown docs in git: an overview at the top that links to one doc per feature. To change the app you open a pull request against the spec, not the code. Once it's merged and you pull, a background agent on your Mac builds the change on a review branch, writes Swift tests tagged with the rules they check, and records which spec revision the code now matches. The spec stays a *stateful* source of truth: it always describes what the app actually does.
 
@@ -23,7 +51,7 @@ The test the agent writes for it names the rule:
 func relabelKeepsScannerXP() { … }
 ```
 
-Your spec is plain Markdown in whatever shape you like; specloop only needs bold rule IDs. `specloop coverage` maps every rule to its tests, and `specloop blame` follows a failing test or a crash back to the rule and the commit that built it.
+`specloop coverage` maps every rule to its tests, and `specloop blame` follows a failing test or a crash back to the rule and the commit that built it.
 
 > Status: early. Built for iOS projects (Swift Testing or XCTest, run with `xcodebuild`) and extracted from one shipped SwiftUI app in October 2026. See [docs/lessons.md](docs/lessons.md) for what's been learned so far, including what hasn't been proven yet. See [examples/ios-swift](examples/ios-swift/) for a trimmed-down setup.
 
@@ -143,6 +171,30 @@ If your specloop is older than a project's `minVersion`, commands warn and still
 
 **Moving over from a copied install:** projects set up by the old `install.sh` have full copies of the CLI, hooks and skills. `specloop update` recognizes unedited copies and replaces them with the small files. A file you edited is kept, with a diff, and `status` keeps pointing it out. The old trigger is removed, and the section pasted into `CLAUDE.md` is put between markers, leaving your "Spec sync rules for this project" alone.
 
+## Uninstall
+
+**Turn the trigger off** in a clone, and nothing starts agents any more:
+
+```bash
+git config --unset core.hooksPath
+```
+
+**Remove specloop from a project.** Clear out finished syncs first with `tools/specloop cleanup`, then delete what `specloop init` added and commit:
+- `tools/specloop` and `tools/githooks/`
+- `.claude/skills/spec-sync/`, `.claude/skills/spec-init/` and `.claude/skills/spec-triage/`
+- specloop's block in `CLAUDE.md` / `AGENTS.md`, from `<!-- specloop:begin` to `<!-- specloop:end -->`
+- `specloop.json`, the ledger `docs/.spec-implemented`, and `docs/signals/` if you used signals
+
+Your spec is yours: `docs/spec/` is plain Markdown and stays useful without specloop, and so do the rule IDs in your test names. Local state lives in `.git/specloop/` and goes when you delete it or the clone.
+
+**Remove it from your Mac:**
+
+```bash
+brew uninstall specloop && brew untap KVTaniguchi/tap
+```
+
+For an `install.sh` setup, delete the `~/.local/bin/specloop` link instead.
+
 ## Day to day
 
 | You want to… | Do this |
@@ -167,6 +219,7 @@ If your specloop is older than a project's `minVersion`, commands warn and still
 ## Docs
 
 - [Your first sync](docs/first-sync.md): from install to a reviewed sync branch on your own app
+- [Troubleshooting](docs/troubleshooting.md): what to do when a sync doesn't start, stalls or fails
 - [Writing a spec](docs/spec-format.md): the tree, IDs, good rules, tagging tests in each framework
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
 - [Attribution and feedback](docs/attribution.md): commit trailers, blame, signals and triage
