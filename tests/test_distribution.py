@@ -168,6 +168,39 @@ class ClaudeBlockTests(unittest.TestCase):
         new, _ = project.apply_block(text)
         self.assertTrue(new.endswith("## Build\n\nmake\n"))
 
+    def test_block_names_a_single_file_spec(self):
+        new, _ = project.apply_block("# App\n", config={"spec": "docs/SPEC.md", "ledger": "docs/.spec-implemented"})
+        self.assertIn("**`docs/SPEC.md` is the source of truth**", new)
+        self.assertIn("a pull request against `docs/SPEC.md`", new)
+        self.assertNotIn("docs/spec/", new)
+
+    def test_block_names_a_tree_spec_and_ledger(self):
+        body = project.block_body({"spec": "Spec", "ledger": "Spec/.implemented"})
+        self.assertIn("**The spec in `Spec/` is the source of truth**", body)
+        self.assertIn("`Spec/README.md` is the overview", body)
+        self.assertIn("- `Spec/.implemented` holds the commit", body)
+
+    def test_pasted_section_keeps_lines_the_project_wrote(self):
+        # Older template wording, as a project pasted it, and an instruction of the project's own.
+        older = ("- Tests name the spec IDs they check at the start of their display name, e.g. `@Test(\"XP-6: …\")`. "
+                 "`tools/specloop coverage` reports which IDs have tests and fails on IDs the spec doesn't define. "
+                 "`tools/specloop status` gives a summary.")
+        mine = "- **Keep the spec in view.** Open the rule in the Files pane whenever we discuss it."
+        rules = f"{project.RULES_HEADING}\n\n- Never bump the build number.\n"
+        text = f"# App\n\n{project.PASTED_HEADING}\n\n{older}\n{mine}\n\n{rules}"
+        new, diff = project.apply_block(text)
+        kept = new[new.index(project.END):]
+        self.assertIn(f"{project.KEPT_HEADING}\n\n{mine}\n", kept)
+        self.assertNotIn("display name", kept)
+        self.assertTrue(new.endswith(rules))
+        self.assertIn("kept 1 line this project wrote", diff)
+
+    def test_pasted_template_alone_keeps_nothing(self):
+        template = sorted((DATA / "copies" / "claude-md-template").iterdir())[-1].read_text()
+        section = template[: template.index(project.RULES_HEADING)] if project.RULES_HEADING in template else template
+        new, _ = project.apply_block("# App\n\n" + section)
+        self.assertNotIn(project.KEPT_HEADING, new)
+
     def test_unchanged_block_has_no_diff(self):
         new, _ = project.apply_block("x\n")
         self.assertEqual(project.apply_block(new), (new, ""))
@@ -184,6 +217,14 @@ class InitBlockTests(SpecloopTestCase):
         subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, check=True)
         self.assertIn(project.BEGIN, (path / "CLAUDE.md").read_text())
         self.assertFalse((path / "AGENTS.md").exists())
+
+    def test_init_block_follows_the_projects_spec(self):
+        path = fresh_git_repo(self.tmp / "single")
+        (path / "specloop.json").write_text(json.dumps({"spec": "docs/SPEC.md"}))
+        subprocess.run([str(HERE / "bin/specloop"), "init", str(path)], capture_output=True, check=True)
+        text = (path / "CLAUDE.md").read_text()
+        self.assertIn("**`docs/SPEC.md` is the source of truth**", text)
+        self.assertNotIn("docs/spec/", text)
 
     def test_init_for_cursor_creates_agents_md(self):
         path = fresh_git_repo(self.tmp / "new")

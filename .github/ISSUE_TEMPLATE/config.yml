@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/KVTaniguchi/specloop/blob/main/docs/troubleshooting.md
+    about: Fixes for syncs that don't start, stall or fail, and other setup problems.

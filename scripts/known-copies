@@ -27,6 +27,9 @@ PATHS = {
     "post-rewrite": ["hooks/post-rewrite"],
     "commit-msg": ["hooks/commit-msg"],
     **{name: [f"skills/{name}/SKILL.md", f"{DATA}/skills/{name}/SKILL.md"] for name in ("spec-sync", "spec-init", "spec-triage")},
+    # Never copied as a file; `update` reads its versions to tell the lines a
+    # project added to a pasted section from the template's own.
+    "claude-md-template": ["templates/CLAUDE.md"],
 }
 
 

@@ -1,0 +1,16 @@
+name: Idea or feature request
+description: Something specloop should do for your iOS project
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What were you trying to do, and where did specloop get in the way or fall short?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: Your idea, if you have one. A rough sketch is fine.
