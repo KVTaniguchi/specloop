@@ -34,18 +34,18 @@ git tag "v$version"
 
 rm -rf dist
 python3 -m build >/dev/null
-sha=$(shasum -a 256 "dist/specloop-$version.tar.gz" | cut -d' ' -f1)
 
 cat <<DONE
 
 Released v$version locally. To publish:
 
   git push --follow-tags
+  gh release create v$version --notes-from-tag   # or paste the CHANGELOG section
   twine upload dist/*
 
 Then in the KVTaniguchi/homebrew-tap repository, set Formula/specloop.rb
-(template: packaging/homebrew/specloop.rb) to:
+(template: packaging/homebrew/specloop.rb) to the tag's tarball:
 
-  url "https://files.pythonhosted.org/packages/source/s/specloop/specloop-$version.tar.gz"
-  sha256 "$sha"
+  url "https://github.com/KVTaniguchi/specloop/archive/refs/tags/v$version.tar.gz"
+  sha256 from: curl -sL https://github.com/KVTaniguchi/specloop/archive/refs/tags/v$version.tar.gz | shasum -a 256
 DONE

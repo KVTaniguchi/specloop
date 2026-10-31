@@ -5,7 +5,7 @@ class Specloop < Formula
 
   desc "Keep a spec, the code, and the tests in lockstep with your coding agent"
   homepage "https://github.com/KVTaniguchi/specloop"
-  url "https://files.pythonhosted.org/packages/source/s/specloop/specloop-VERSION.tar.gz"
+  url "https://github.com/KVTaniguchi/specloop/archive/refs/tags/vVERSION.tar.gz"
   sha256 "SHA256"
   license "MIT"
 
