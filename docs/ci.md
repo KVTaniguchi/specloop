@@ -105,7 +105,7 @@ jobs:
           tools/specloop check --format github ${range:+--trailers "$range"}
 ```
 
-`tools/specloop` runs the specloop installed on the machine, and a CI runner has none, so the workflow installs it first. The action installs exactly the project's `minVersion` from `specloop.json`, not the latest release. That way the result of a gating check only changes when a commit changes the minimum (`specloop update` raises it). Without the action, `pipx install "specloop==<minVersion>"` does the same.
+`tools/specloop` runs the specloop installed on the machine, and a CI runner has none, so the workflow installs it first. The action installs exactly the project's `minVersion` from `specloop.json`, not the latest release. That way the result of a gating check only changes when a commit changes the minimum (`specloop update` raises it). Without the action, `pipx install "git+https://github.com/KVTaniguchi/specloop@v<minVersion>"` does the same.
 
 This checks trailers on the commits each run brings in: a pull request's own commits, or what a push added to the branch. The push check is what catches a squash merge that dropped them. A branch's first push has no `before` to compare with, so it skips the trailer check.
 
