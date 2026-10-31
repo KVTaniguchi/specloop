@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- The CI action installs specloop from its GitHub release tag instead of PyPI, where specloop isn't published. Workflows pinned to `KVTaniguchi/specloop@v0.1.0` failed to install; pin `@v0.1.1`.
+- Install hints (the shim's "not installed" message, `/spec-init`, `install.sh`) name Homebrew only.
+- The README is about iOS projects, and opens with a demo.
+
 ## 0.1.0
 
 - specloop installs once per machine (`brew install KVTaniguchi/tap/specloop` or `pipx install specloop`) and is updated by that package manager.

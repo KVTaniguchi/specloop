@@ -95,7 +95,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # the ledger, the reused-ID check and the trailers need history
-      - uses: KVTaniguchi/specloop@v0.1.0   # installs the project's minVersion
+      - uses: KVTaniguchi/specloop@v0.1.1   # installs the project's minVersion
       - run: |
           if [ "${{ github.event_name }}" = pull_request ]; then
             range="origin/${{ github.base_ref }}..HEAD"

@@ -9,7 +9,7 @@ The goal: a spec that describes what the project **does today**, accurately enou
 
 ## 1. Install the plumbing
 
-If `tools/specloop` doesn't exist, run `specloop init` at the project root (install specloop first with `brew install KVTaniguchi/tap/specloop` or `pipx install specloop` if it isn't). Then fill in `specloop.json`:
+If `tools/specloop` doesn't exist, run `specloop init` at the project root (install specloop first with `brew install KVTaniguchi/tap/specloop` if it isn't). Then fill in `specloop.json`:
 - `commands.test`: the exact command that runs the test suite
 - `tests.paths`: the test directories
 - `tests.tagStyles`: which tag styles the project's test framework uses
