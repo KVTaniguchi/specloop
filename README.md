@@ -203,6 +203,7 @@ For an `install.sh` setup, delete the `~/.local/bin/specloop` link instead.
 | Build someone else's spec change | `/spec-sync` (the hook leaves it to its author; `status` says whose it is) |
 | Build every spec change you pull | `"trigger": "all"` under `sync` in `specloop.json` |
 | Skip the trigger once | `SPEC_SYNC=off git commit …` |
+| Check the setup | `tools/specloop doctor`: config, tests, hooks, agent login and folder trust, each with its fix |
 | See what's pending | `tools/specloop status` (each pending revision: not started, running, awaiting review, blocked, failed) / `tools/specloop pending` |
 | Hotfix code directly | Change code **and** spec in one commit (`SPEC_SYNC=off`), then `tools/specloop mark` |
 | Check test coverage | `tools/specloop coverage` (`--uncovered`, `--require XP,LVL`) |

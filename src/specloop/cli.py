@@ -2,6 +2,8 @@
 specloop — keep a spec, the code, and the tests in lockstep.
 
     specloop status                  ledger, pending spec change, coverage summary
+    specloop doctor                  check the setup: config, tests, hooks, agent
+                                     login and trust; says how to fix each problem
     specloop pending [--ids]         spec diff since the implemented revision
     specloop coverage [--uncovered] [--require P1,P2] [--ids ID,...]
                                      spec ID -> test traceability
@@ -450,6 +452,17 @@ def changed_ids(root, config, base, head="HEAD"):
 # MARK: tests
 
 
+def test_files(root, config):
+    """Every file under tests.paths with one of tests.extensions."""
+    tests = config["tests"]
+    return [
+        path
+        for test_dir in tests["paths"] if (root / test_dir).exists()
+        for path in sorted((root / test_dir).rglob("*"))
+        if path.is_file() and path.suffix in tests["extensions"]
+    ]
+
+
 def test_claims(root, config):
     """Map of spec ID -> list of (path, line number, line text)."""
     tests = config["tests"]
@@ -457,23 +470,16 @@ def test_claims(root, config):
     patterns += [re.compile(p, re.MULTILINE) for p in tests["extraPatterns"]]
     id_re = re.compile(config["idPattern"])
     claims = defaultdict(list)
-    scanned = 0
-    for test_dir in tests["paths"]:
-        base = root / test_dir
-        if not base.exists():
-            continue
-        for path in sorted(base.rglob("*")):
-            if not path.is_file() or path.suffix not in tests["extensions"]:
-                continue
-            scanned += 1
-            for number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
-                for pattern in patterns:
-                    if match := pattern.search(line):
-                        where = (str(path.relative_to(root)), number, line.strip()[:80])
-                        for spec_id in id_re.findall(match.group("ids")):
-                            claims[spec_id].append(where)
-                        break
-    if scanned == 0:
+    files = test_files(root, config)
+    for path in files:
+        for number, line in enumerate(path.read_text(errors="ignore").splitlines(), 1):
+            for pattern in patterns:
+                if match := pattern.search(line):
+                    where = (str(path.relative_to(root)), number, line.strip()[:80])
+                    for spec_id in id_re.findall(match.group("ids")):
+                        claims[spec_id].append(where)
+                    break
+    if not files:
         # 0% coverage from a wrong path looks just like 0% from no tests.
         print(
             f"warning: no test files found under {tests['paths']} "
@@ -1986,11 +1992,166 @@ def cmd_status(root, config, args):
     return 0
 
 
+# MARK: doctor
+#
+# Every check here is something that went wrong on a real project (see
+# docs/lessons.md and docs/troubleshooting.md). An error stops syncs from
+# working; a warning is worth fixing but doesn't.
+
+DOCTOR_SYMBOLS = {"ok": "✓", "warn": "!", "error": "✗", "info": "·"}
+# Where the shim looks after PATH, because git GUIs run hooks with a short one.
+SHIM_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin")
+# Claude Code's folder trust didn't stick for a project under these.
+TEMP_DIRS = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+
+
+def claude_trusts(root):
+    """Whether Claude Code has recorded trust for this folder or one above it.
+    Read from ~/.claude.json, which isn't a documented format, so a missing
+    or unreadable file only means "couldn't tell"."""
+    try:
+        projects = json.loads((Path.home() / ".claude.json").read_text()).get("projects", {})
+        here = root.resolve()
+        return any(projects.get(str(p), {}).get("hasTrustDialogAccepted") for p in [here, *here.parents])
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def doctor_checks(root, config, gap):
+    """(level, name, message, fix) for each part of the setup."""
+    checks = []
+
+    def add(level, name, message, fix=""):
+        checks.append((level, name, message, fix))
+
+    minimum = f", and the project needs {config['minVersion']} or later" if config.get("minVersion") else ""
+    if gap:
+        add("error", "version", gap)
+    else:
+        add("ok", "version", f"specloop {__version__}{minimum}")
+
+    command = config["commands"]["test"].strip()
+    if not (root / "specloop.json").exists():
+        add("error", "config", "no specloop.json in this project", "run specloop init")
+    elif not command or command.startswith("<"):
+        add("error", "config", "commands.test isn't set, so a sync can't run your tests",
+            "set commands.test in specloop.json, e.g. your xcodebuild test command")
+    else:
+        add("ok", "config", f"tests run with: {command if len(command) <= 60 else command[:57] + '...'}")
+
+    tests = config["tests"]
+    files = test_files(root, config)
+    if files:
+        add("ok", "tests", f"{len(files)} test file{'s' * (len(files) != 1)} under {', '.join(tests['paths'])}")
+    else:
+        add("error", "tests", f"no test files under {tests['paths']} with extensions {tests['extensions']}",
+            "fix tests.paths and tests.extensions in specloop.json")
+
+    if (root / spec_root(config)).exists():
+        add("ok", "spec", config["spec"])
+    else:
+        add("error", "spec", f"no spec at {config['spec']}", "run /spec-init to draft one from your code")
+
+    if (root / config["ledger"]).exists():
+        add("ok", "ledger", f"{config['ledger']} records the implemented spec")
+    else:
+        add("warn", "ledger", "no baseline yet, so every rule looks pending",
+            f"run /spec-init, or tools/specloop mark and commit {config['ledger']}")
+
+    states = {rel: project.classify(root / rel, rel) if (root / rel).exists() else "missing" for rel in project.thin_files()}
+    missing = [rel for rel, state in states.items() if state == "missing"]
+    old = [rel for rel, state in states.items() if state in ("thin", "copy")]
+    edited = [rel for rel, state in states.items() if state == "edited"]
+    if missing:
+        add("error", "files", f"missing {', '.join(missing)}", "run specloop init")
+    elif old:
+        add("warn", "files", f"{len(old)} from an older specloop or a copied install ({', '.join(old)})",
+            "run specloop update, review and commit")
+    elif edited:
+        add("warn", "files", f"edited here: {', '.join(edited)}", "specloop update keeps them and shows the diff")
+    else:
+        add("ok", "files", "shims, hooks and skill stubs match this version")
+
+    hooks = git(root, "config", "--get", "core.hooksPath", check=False).strip()
+    # Relative or absolute, as long as it's this project's tools/githooks.
+    on = bool(hooks) and (root / hooks).resolve() == (root / "tools" / "githooks").resolve()
+    if on:
+        whose = "every spec change" if config["sync"]["trigger"] == "all" else "spec changes you write"
+        add("ok", "trigger", f"on: {whose} start a background sync")
+    elif hooks:
+        add("warn", "trigger", f"core.hooksPath is {hooks}, so specloop's hooks don't run",
+            "git config core.hooksPath tools/githooks")
+    else:
+        add("info", "trigger", "off: a sync starts only when you run /spec-sync",
+            "to turn it on: git config core.hooksPath tools/githooks")
+
+    if any(os.access(Path(d).expanduser() / "specloop", os.X_OK) for d in SHIM_DIRS):
+        add("ok", "hooks", "git GUIs such as Xcode can find specloop")
+    else:
+        add("warn", "hooks", "specloop isn't in /opt/homebrew/bin, /usr/local/bin or ~/.local/bin, "
+            "so hooks run from a git GUI such as Xcode won't find it", "commit from a terminal, or install with brew")
+
+    # The agent only matters to the trigger; without it, these are warnings.
+    severe, later = ("error", "") if on else ("warn", " (needed once the trigger is on)")
+    if harness(root, config) == "cursor":
+        if shutil.which("agent") or shutil.which("cursor-agent"):
+            add("ok", "cursor", "Cursor's agent CLI is installed")
+        else:
+            add(severe, "cursor", f"Cursor's agent CLI isn't on PATH{later}", "install it, then run agent login")
+    else:
+        claude = shutil.which("claude")
+        try:
+            status = subprocess.run([claude, "auth", "status"], capture_output=True, text=True, timeout=15).stdout if claude else ""
+        except (OSError, subprocess.TimeoutExpired):
+            status = ""
+        if not claude:
+            add(severe, "claude", f"the claude CLI isn't on PATH{later}", "install Claude Code's command-line tool")
+        elif re.search(r'"loggedIn":\s*false', status):
+            add(severe, "claude", f"the claude CLI isn't logged in{later} (the desktop app's login is separate)", "claude auth login")
+        elif re.search(r'"loggedIn":\s*true', status):
+            add("ok", "claude", "the claude CLI is logged in")
+        else:
+            add("warn", "claude", "couldn't tell whether the claude CLI is logged in", "claude auth status")
+        if claude_trusts(root):
+            add("ok", "trust", "Claude Code trusts this folder")
+        else:
+            add("warn", "trust", "couldn't confirm Claude Code trusts this folder; background sessions only start in a trusted one",
+                "run claude here once and accept the trust prompt")
+
+    if str(root.resolve()).startswith(TEMP_DIRS):
+        add("warn", "location", "this project is under a temp folder, where Claude Code's trust may not stick",
+            "keep projects somewhere like ~/Development")
+
+    leftover = cleanup_candidates(root, config)
+    if leftover:
+        add("warn", "worktrees", f"{len(leftover)} left over from finished or dead syncs", "tools/specloop cleanup")
+    return checks
+
+
+def cmd_doctor(root, config, args):
+    checks = doctor_checks(root, config, args.gap)
+    for level, name, message, fix in checks:
+        print(f"{DOCTOR_SYMBOLS[level]} {name:<10}{message}")
+        if fix:
+            print(f"{'':12}→ {fix}")
+    errors = sum(1 for check in checks if check[0] == "error")
+    warnings = sum(1 for check in checks if check[0] == "warn")
+    print()
+    if errors:
+        print(f"{errors} problem{'s' * (errors != 1)} to fix before syncs will work" + (f", and {warnings} warning{'s' * (warnings != 1)}." if warnings else "."))
+    elif warnings:
+        print(f"Ready, with {warnings} warning{'s' * (warnings != 1)}.")
+    else:
+        print("Everything looks good.")
+    return 1 if errors else 0
+
+
 def run():
     parser = argparse.ArgumentParser(prog="specloop", description=__doc__.strip().split("\n")[0])
     parser.add_argument("--version", action="version", version=f"specloop {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    sub.add_parser("doctor", help="check this project's setup and say how to fix what's wrong")
     p = sub.add_parser("pending")
     p.add_argument("--ids", action="store_true", help="only list IDs on changed lines")
     p = sub.add_parser("coverage")
@@ -2078,10 +2239,11 @@ def run():
     config = load_config(root)
     # init works on another project; the rest report the gap themselves.
     args.gap = None if args.command == "init" else version_gap(config)
-    if args.gap and args.command not in ("version-ok", "skill", "status", "hook", "update"):
+    if args.gap and args.command not in ("version-ok", "skill", "status", "doctor", "hook", "update"):
         print(args.gap, file=sys.stderr)
     handler = {
         "status": cmd_status,
+        "doctor": cmd_doctor,
         "pending": cmd_pending,
         "coverage": cmd_coverage,
         "check": cmd_check,
