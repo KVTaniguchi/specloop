@@ -1,10 +1,29 @@
 # specloop
 
-**Keep a spec, the code, and the tests in lockstep — with your coding agent (Claude Code or Cursor) doing the implementation.**
+**Keep an iOS app's spec, its code and its tests in lockstep, with Claude Code or Cursor doing the implementation.**
 
-The product is described by a tree of Markdown docs in git: an overview at the top that links to one doc per feature. To change the product you open a pull request against the spec, not the code. Once it's merged and you pull, a background agent on your machine builds the change on a review branch, writes tests tagged with the rules they check, and records which spec revision the code now matches. The spec stays a *stateful* source of truth: it always describes what the project actually does.
+![A spec change to the iOS example: the commit hook queues a sync, and status shows XP-1 pending](docs/demo.gif)
 
-> Status: early. Extracted from one real iOS project in October 2026. See [docs/lessons.md](docs/lessons.md) for what's been learned so far, including what hasn't been proven yet.
+*The [iOS example](examples/ios-swift/), with the trigger in dry-run mode. A real commit starts a background Claude Code session that builds XP-1 on a review branch.*
+
+Your app's behavior is described by a tree of Markdown docs in git: an overview at the top that links to one doc per feature. To change the app you open a pull request against the spec, not the code. Once it's merged and you pull, a background agent on your Mac builds the change on a review branch, writes Swift tests tagged with the rules they check, and records which spec revision the code now matches. The spec stays a *stateful* source of truth: it always describes what the app actually does.
+
+A rule in the spec:
+
+```markdown
+- **XP-2:** When the player relabels a catch, they earn the XP of the scanner's result, not of the breed they picked.
+```
+
+The test the agent writes for it names the rule:
+
+```swift
+@Test("XP-2, XP-3: relabeling keeps the scanner's XP")
+func relabelKeepsScannerXP() { … }
+```
+
+`specloop coverage` maps every rule to its tests, and `specloop blame` follows a failing test or a crash back to the rule and the commit that built it.
+
+> Status: early. Built for iOS projects (Swift Testing or XCTest, run with `xcodebuild`) and extracted from one shipped SwiftUI app in October 2026. See [docs/lessons.md](docs/lessons.md) for what's been learned so far, including what hasn't been proven yet. See [examples/ios-swift](examples/ios-swift/) for a trimmed-down setup.
 
 ## Why another spec-driven tool?
 
@@ -50,7 +69,7 @@ spec PR ──► review ──► merge ──► git pull (or commit locally)
 
 ## Install
 
-Requirements: git, Python 3.8+ (standard library only), and a coding agent for the skills and trigger: [Claude Code](https://claude.com/claude-code), or [Cursor](https://cursor.com) with its `agent` CLI.
+Requirements: a Mac with Xcode and git, and a coding agent for the skills and trigger: [Claude Code](https://claude.com/claude-code), or [Cursor](https://cursor.com) with its `agent` CLI.
 
 Install specloop once per machine:
 
