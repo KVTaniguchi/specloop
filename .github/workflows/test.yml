@@ -16,6 +16,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # the update tests read the old copied install from history
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
