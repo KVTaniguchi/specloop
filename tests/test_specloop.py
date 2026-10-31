@@ -103,6 +103,7 @@ class Repo:
             + ("exec sleep 5\n" if agent_exit == 0 else "echo 'Authentication required. Run agent login.'\nexit 1\n")
         )
         agent.chmod(0o755)
+        (bin_dir / "specloop").symlink_to(HERE / "bin" / "specloop")
         self.env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
         self.env.pop("SPEC_SYNC", None)
 
@@ -111,10 +112,6 @@ class Repo:
         self.git("config", "user.name", "Test")
         self.git("config", "user.email", "test@example.com")
         self.git("config", "commit.gpgsign", "false")
-        (path / "tools" / "githooks").mkdir(parents=True)
-        shutil.copy(HERE / "bin" / "specloop", path / "tools" / "specloop")
-        for hook in ("specloop-trigger", "post-commit", "post-merge", "post-rewrite", "commit-msg"):
-            shutil.copy(HERE / "hooks" / hook, path / "tools" / "githooks" / hook)
         config = {"tests": {"paths": ["tests"]}, "sync": {"require": ["XP"]}}
         if tree:
             config["spec"] = "docs/spec"
@@ -126,6 +123,9 @@ class Repo:
             self.write("docs/SPEC.md", SPEC)
             self.write("tests/test_rules.py", TESTS)
         self.write("specloop.json", json.dumps(config))
+        # The thin files a real project keeps; they find this checkout's
+        # specloop through the `specloop` on PATH.
+        subprocess.run(["specloop", "init"], cwd=path, env=self.env, capture_output=True, check=True)
         self.commit("baseline", SPEC_SYNC="off")
         self.run("mark")
         self.commit("ledger")
@@ -898,7 +898,7 @@ class TrailerTests(SpecloopTestCase):
         before = repo.run_in(path, "trailers", "--model", "claude-opus-5-5")
         self.assertEqual(before.returncode, 0, before.output)
         self.assertIn(f"Spec-Rev: {rev[:12]}\nSpec-Rules: XP-1@{XP1_NEW}\nHarness: claude-code claude-opus-5-5\n", before.stdout)
-        self.assertRegex(before.stdout, r"Harness-Rev: claude-md@[0-9a-f]{6}\n")
+        self.assertRegex(before.stdout, r"Harness-Rev: specloop@[0-9.]+ claude-md@[0-9a-f]{6}\n")
         self.assertIn(f"Sync: {short}", before.stdout)
         repo.run_in(path, "mark", "HEAD")
         self.assertEqual(repo.run_in(path, "trailers", "--model", "claude-opus-5-5").stdout, before.stdout)
