@@ -6,6 +6,8 @@
 
 *The [iOS example](examples/ios-swift/), with the trigger in dry-run mode. A real commit starts a background Claude Code session that builds XP-1 on a review branch.*
 
+**Spec drift** is what happens once a coding agent writes most of your app: the code moves fast, the spec stops describing it, and soon nobody can say which rules the code actually follows. specloop stops the drift.
+
 Your app's behavior is described by a tree of Markdown docs in git: an overview at the top that links to one doc per feature. To change the app you open a pull request against the spec, not the code. Once it's merged and you pull, a background agent on your Mac builds the change on a review branch, writes Swift tests tagged with the rules they check, and records which spec revision the code now matches. The spec stays a *stateful* source of truth: it always describes what the app actually does.
 
 A rule in the spec:
@@ -21,13 +23,13 @@ The test the agent writes for it names the rule:
 func relabelKeepsScannerXP() { … }
 ```
 
-`specloop coverage` maps every rule to its tests, and `specloop blame` follows a failing test or a crash back to the rule and the commit that built it.
+Your spec is plain Markdown in whatever shape you like; specloop only needs bold rule IDs. `specloop coverage` maps every rule to its tests, and `specloop blame` follows a failing test or a crash back to the rule and the commit that built it.
 
 > Status: early. Built for iOS projects (Swift Testing or XCTest, run with `xcodebuild`) and extracted from one shipped SwiftUI app in October 2026. See [docs/lessons.md](docs/lessons.md) for what's been learned so far, including what hasn't been proven yet. See [examples/ios-swift](examples/ios-swift/) for a trimmed-down setup.
 
 ## Why another spec-driven tool?
 
-Tools like GitHub Spec Kit and Kiro focus on the step from spec to plan to code. specloop focuses on what happens **after** that, when the spec has to stay true:
+Tools like GitHub Spec Kit, Kiro, [GSD](https://github.com/open-gsd/gsd-core) and, for Apple apps, [SwiftShip](https://github.com/rshankras/SwiftShip) take you from a spec or an idea to a plan to code. specloop doesn't replace them. It handles what happens **after** the code exists, when the spec has to stay true. Use them to build a feature, and specloop to keep it from drifting:
 
 - **Ledger.** `docs/.spec-implemented` records the exact spec revision the code matches, so "what's left to build" is always just a `git diff`.
 - **Traceability.** Every rule has a stable ID. Every test names the IDs it checks. `specloop coverage` maps the two and fails when a test names an ID the spec no longer defines.
@@ -67,6 +69,17 @@ spec PR ──► review ──► merge ──► git pull (or commit locally)
                you review the branch and merge
 ```
 
+## What runs on your machine
+
+specloop starts coding agents from a git hook, so here is exactly what it does:
+
+- **Nothing runs until you turn it on.** The trigger is off until you set `core.hooksPath` in your clone. `SPEC_SYNC=off` skips it for one commit, and `SPEC_SYNC=dry-run` shows what it would start.
+- **It only builds your own changes.** By default the hook builds spec changes you wrote, not every change you pull.
+- **Your checkout isn't touched.** The agent works in its own worktree, on a `spec-sync/<sha>` branch. You review that branch and merge it.
+- **Nothing is pushed for you.** The agent is instructed not to push or merge. That is an instruction to the agent, not a hard block, so it runs with your harness's permission settings: Claude Code's `auto` mode by default (`sync.permissionMode` in `specloop.json`), or Cursor's `agent --force`.
+- **specloop never phones home.** The CLI makes no network calls: no telemetry, no update checks. The only network traffic is your coding agent's own.
+- **A missing specloop never fails a commit.** If it isn't installed, the hooks print a note and step aside.
+
 ## Install
 
 Requirements: a Mac with Xcode and git, and a coding agent for the skills and trigger: [Claude Code](https://claude.com/claude-code), or [Cursor](https://cursor.com) with its `agent` CLI.
@@ -99,7 +112,7 @@ This writes small files that run whatever specloop is installed on the machine, 
 | `specloop.json` | Spec path, test dirs and tag styles, test command, and `minVersion`, the oldest specloop the project relies on |
 | `docs/spec/` | Overview and feature templates, only if you don't have a spec |
 
-Then:
+Then follow [Your first sync](docs/first-sync.md) for a walkthrough, or in short:
 1. Fill in `specloop.json`, especially `commands.test` and `tests.paths`.
 2. In Claude Code or Cursor, run `/spec-init`. It drafts the spec from the code as it is today, tags existing tests, and records the baseline.
 3. **Enable the trigger (optional).** The hook starts background Claude Code agents that edit code on their own, so this step is a deliberate opt-in. Claude Code's safety checks may ask you to confirm. Without it, run `/spec-sync` yourself after committing a spec change.
@@ -153,6 +166,7 @@ If your specloop is older than a project's `minVersion`, commands warn and still
 
 ## Docs
 
+- [Your first sync](docs/first-sync.md): from install to a reviewed sync branch on your own app
 - [Writing a spec](docs/spec-format.md): the tree, IDs, good rules, tagging tests in each framework
 - [Sensors and CI](docs/ci.md): how syncs are tracked and cleaned up, and `specloop check` in GitHub Actions
 - [Attribution and feedback](docs/attribution.md): commit trailers, blame, signals and triage
