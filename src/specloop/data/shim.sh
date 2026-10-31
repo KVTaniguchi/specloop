@@ -3,7 +3,7 @@
 # Written by `specloop init` and kept current by `specloop update`. Don't edit.
 #
 # Git GUIs run hooks with a short PATH that often leaves out Homebrew and
-# pipx, so after PATH this looks where those install.
+# ~/.local/bin (where install.sh links), so after PATH this looks there too.
 here=$(cd -P "$(dirname "$0")" && pwd)
 IFS=:
 for dir in $PATH /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
@@ -14,7 +14,7 @@ for dir in $PATH /opt/homebrew/bin /usr/local/bin "$HOME/.local/bin"; do
 done
 unset IFS
 
-install="brew install KVTaniguchi/tap/specloop, or pipx install specloop"
+install="brew install KVTaniguchi/tap/specloop"
 if [ "$1" = hook ]; then
     # Never fail a commit, merge or rebase because specloop isn't installed.
     echo "specloop: not installed ($install); skipping" >&2

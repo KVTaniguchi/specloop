@@ -1,0 +1,15 @@
+{
+  "rev": "c3054129e334abe2c537e0177c133534ba95b747",
+  "started": "2026-10-31T12:02:22+00:00",
+  "branch": "spec-sync/c305412",
+  "base": "7393c99b4b96668e3a329cbdd903edddb5aa4a40",
+  "status": "done",
+  "note": "",
+  "updated": "2026-10-31T12:02:23+00:00",
+  "finished": "2026-10-31T12:02:23+00:00",
+  "built": "fd181dc545da1868ba4095aa100c4bcdac2d7ce4",
+  "branchTip": "fd181dc545da1868ba4095aa100c4bcdac2d7ce4",
+  "branchMerged": true,
+  "ledger": "c3054129e334abe2c537e0177c133534ba95b747",
+  "archived": "2026-10-31T12:02:23+00:00"
+}

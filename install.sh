@@ -4,8 +4,8 @@
 # it up in a project:  ./install.sh /path/to/project
 #
 # Links ~/.local/bin/specloop to this checkout's bin/specloop, so `git pull`
-# here updates it, then runs `specloop init` in the project. With Homebrew
-# or pipx, install with those instead and run `specloop init` yourself.
+# here updates it, then runs `specloop init` in the project. With Homebrew,
+# install with that instead and run `specloop init` yourself.
 
 set -eu
 
@@ -15,7 +15,7 @@ bin="$HOME/.local/bin"
 link="$bin/specloop"
 
 if [ -e "$link" ] && [ ! -L "$link" ]; then
-    echo "error: $link already exists and isn't a link; remove it, or install with brew or pipx instead" >&2
+    echo "error: $link already exists and isn't a link; remove it, or install with brew instead" >&2
     exit 1
 fi
 mkdir -p "$bin"
